@@ -576,7 +576,7 @@ index 0000000..fa752b4
 +    }
 +}
 diff --git a/Apelin/Interface/Chats/ChatController.swift b/Apelin/Interface/Chats/ChatController.swift
-index ea62ed9..2d730e1 100644
+index ea62ed9..dc86daa 100644
 --- a/Apelin/Interface/Chats/ChatController.swift
 +++ b/Apelin/Interface/Chats/ChatController.swift
 @@ -31,6 +31,9 @@ final class ChatController: UIViewController {
@@ -626,20 +626,16 @@ index ea62ed9..2d730e1 100644
      }
  
      @available(*, unavailable)
-@@ -125,6 +151,9 @@ final class ChatController: UIViewController {
- 
-         replaceMessageList()
-         view.addSubview(topBlur)
-+        // the meter sits at the bar's lower edge, so it belongs over the
-+        // blur that softens what scrolls under it
-+        view.bringSubviewToFront(contextBar)
- 
-         composerBackground.backgroundColor = .pageBackground
-         composerSeparator.backgroundColor = .separator
-@@ -231,6 +260,35 @@ final class ChatController: UIViewController {
+@@ -229,6 +255,39 @@ final class ChatController: UIViewController {
+             make.bottom.equalTo(composerBackground.snp.top).offset(-8)
+             make.size.equalTo(44)
          }
-     }
- 
++        // last: the meter is pinned to the composer's top edge, and a
++        // constraint between two views with no common ancestor throws when it
++        // is activated. Before this point the composer has no superview.
++        installContextBar()
++    }
++
 +    /// The open conversation, looked through by text.
 +    private func searchConversation() {
 +        presentPageAsFormSheet(ChatSearchController(messages: messages))
@@ -667,20 +663,10 @@ index ea62ed9..2d730e1 100644
 +            Task { _ = try? await self.runtime.compact(chat.id) }
 +        }
 +        presentPageAsFormSheet(page)
-+    }
-+
+     }
+ 
      @objc dynamic private func replaceMessageList() {
-         let contentInset = messageList.contentInset
-         let indicatorInset = messageList.verticalScrollIndicatorInsets
-@@ -305,6 +363,7 @@ final class ChatController: UIViewController {
-                 }
-         }
-         view.insertSubview(messageList, at: 0)
-+        installContextBar()
-         // The composer is another overlay; explicitly identify the list
-         // whose scroll position drives the navigation bar's edge treatment.
-         setContentScrollView(messageList, for: .top)
-@@ -607,6 +666,28 @@ final class ChatController: UIViewController {
+@@ -607,6 +666,25 @@ final class ChatController: UIViewController {
          let visible = items.filter { !$0.role.isApproval }
          messageList.apply(visible, animated: !isSwitchingChat && !UIAccessibility.isReduceMotionEnabled)
          showApproval(waitingApproval(in: items))
@@ -695,21 +681,18 @@ index ea62ed9..2d730e1 100644
 +    /// rebuilt when the conversation changes, and a subview of it would be
 +    /// thrown away with the old one.
 +    private func installContextBar() {
-+        if contextBar.superview == nil {
-+            contextBar.onTap = { [weak self] in self?.showContext() }
-+            view.addSubview(contextBar)
-+            contextBar.snp.makeConstraints { make in
-+                make.leading.trailing.equalToSuperview().inset(12)
-+                make.bottom.equalTo(composerBackground.snp.top).offset(-8)
-+                make.height.equalTo(32)
-+            }
-+        } else {
-+            view.bringSubviewToFront(contextBar)
++        guard contextBar.superview == nil, composerBackground.superview != nil else { return }
++        contextBar.onTap = { [weak self] in self?.showContext() }
++        view.addSubview(contextBar)
++        contextBar.snp.makeConstraints { make in
++            make.leading.trailing.equalToSuperview().inset(12)
++            make.bottom.equalTo(composerBackground.snp.top).offset(-8)
++            make.height.equalTo(32)
 +        }
      }
  
      /// The request among `items` the composer asks about: one the session's
-@@ -677,7 +758,11 @@ final class ChatController: UIViewController {
+@@ -677,7 +755,11 @@ final class ChatController: UIViewController {
                  }
                  let selected = ComposerModelSelection.current
                  completion(accounts.map { account in
@@ -10799,7 +10782,7 @@ index 3a94bfc..c0c5315 100644
        "localizations" : {
          "ar" : {
 diff --git a/Configuration/Version.xcconfig b/Configuration/Version.xcconfig
-index 068eb46..6b6a9bc 100644
+index 068eb46..912ea1c 100644
 --- a/Configuration/Version.xcconfig
 +++ b/Configuration/Version.xcconfig
 @@ -4,6 +4,11 @@
@@ -10814,8 +10797,8 @@ index 068eb46..6b6a9bc 100644
  
 -MARKETING_VERSION = 0.4.7
 -CURRENT_PROJECT_VERSION = 40
-+MARKETING_VERSION = 0.5.2
-+CURRENT_PROJECT_VERSION = 47
++MARKETING_VERSION = 0.5.3
++CURRENT_PROJECT_VERSION = 48
 diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
 index fe2f6d7..cbb6523 100644
 --- a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
