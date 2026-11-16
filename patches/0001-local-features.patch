@@ -10874,19 +10874,6 @@ index 068eb46..378f371 100644
 -CURRENT_PROJECT_VERSION = 40
 +MARKETING_VERSION = 0.5.6
 +CURRENT_PROJECT_VERSION = 51
-diff --git a/Makefile b/Makefile
-index 001a65b..6ad5c72 100644
---- a/Makefile
-+++ b/Makefile
-@@ -138,7 +138,7 @@ IOS_DEPLOYMENT_FLOOR := $(shell sed -n 's/^[[:space:]]*IPHONEOS_DEPLOYMENT_TARGE
- # refuse an older SDK, and `_package` reads the SDK back from the app it
- # ships. Pick the Xcode with xcode-select or DEVELOPER_DIR (AGENTS.md ▸
- # Decisions ▸ The SDK tier).
--IOS_SDK_TIER        := 27.1
-+IOS_SDK_TIER        := 26.5
- 
- # A device on the network or behind `iproxy $(DEVICE_PORT) 22`. Set
- # DEVICE_PASSWORD empty to use an ssh key instead.
 diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
 index fe2f6d7..c8b8b0d 100644
 --- a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
