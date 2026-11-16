@@ -1298,7 +1298,7 @@ index 0000000..b23193b
 +    }
 +}
 diff --git a/Apelin/Interface/Settings/Accounts/ModelProvidersController.swift b/Apelin/Interface/Settings/Accounts/ModelProvidersController.swift
-index e2446ce..36f068c 100644
+index e2446ce..dbf853c 100644
 --- a/Apelin/Interface/Settings/Accounts/ModelProvidersController.swift
 +++ b/Apelin/Interface/Settings/Accounts/ModelProvidersController.swift
 @@ -12,14 +12,12 @@ import UIKit
@@ -1317,7 +1317,7 @@ index e2446ce..36f068c 100644
              }
          }
      }
-@@ -64,8 +62,23 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -64,8 +62,35 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
      @objc private dynamic var query = ""
      private var sections: [(Section, [Row])] = [(.status, [.status(.loading)])]
      private var loader: Task<Void, Never>?
@@ -1328,6 +1328,18 @@ index e2446ce..36f068c 100644
 +    private var balanceLoader: Task<Void, Never>?
      private let search = UISearchController(searchResultsController: nil)
  
++    /// What tells one row's balance from another's.
++    ///
++    /// A platform is not an account: every relay on the OpenAI-compatible
++    /// shelf shares one `provider.rawValue`, so keying by it let the last
++    /// answer overwrite the first and left one row showing another relay's
++    /// number. The host is what distinguishes an endpoint without a secret,
++    /// which is exactly what a balance belongs to.
++    private static func balanceKey(for account: AgentAccount) -> String {
++        let host = (account.account ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
++        return host.isEmpty ? account.provider.rawValue : "\(account.provider.rawValue)|\(host)"
++    }
++
 +    /// What asking one endpoint came back with.
 +    private enum BalanceState {
 +        case checking
@@ -1341,7 +1353,7 @@ index e2446ce..36f068c 100644
      init() {
          super.init(style: .insetGrouped)
      }
-@@ -77,6 +90,7 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -77,6 +102,7 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
  
      deinit {
          loader?.cancel()
@@ -1349,7 +1361,7 @@ index e2446ce..36f068c 100644
      }
  
      override func viewDidLoad() {
-@@ -85,16 +99,17 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -85,16 +111,17 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
          navigationItem.backButtonDisplayMode = .minimal
          search.searchResultsUpdater = self
          search.obscuresBackgroundDuringPresentation = false
@@ -1373,7 +1385,7 @@ index e2446ce..36f068c 100644
          }
          dataSource.footerTitle = { [weak self] section in
              guard let self, section == sections.last?.0, case .group = section else { return nil }
-@@ -106,6 +121,7 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -106,6 +133,7 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
              return String(localized: "Credentials stay in this device’s keychain. Currently using kwwk \(kwwk).")
          }
          dataSource.update(sections)
@@ -1381,7 +1393,7 @@ index e2446ce..36f068c 100644
      }
  
      override func viewWillAppear(_ animated: Bool) {
-@@ -129,6 +145,59 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -129,6 +157,60 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
              guard let self else { return }
              loaded = true
              regroup()
@@ -1403,7 +1415,7 @@ index e2446ce..36f068c 100644
 +                && $0.provider.kind == .openAICompatible
 +                && ProviderMetaStore.meta(for: $0.provider.rawValue).balanceEnabled
 +        }
-+        let wanted = Set(endpoints.map(\.provider.rawValue))
++        let wanted = Set(endpoints.map { Self.balanceKey(for: $0) })
 +        balances = balances.filter { wanted.contains($0.key) }
 +        guard !endpoints.isEmpty else { return }
 +        balanceLoader = Task { [weak self] in
@@ -1411,10 +1423,11 @@ index e2446ce..36f068c 100644
 +                guard !Task.isCancelled, let self else { return }
 +                let state = await askBalance(account)
 +                guard !Task.isCancelled else { return }
-+                // the row's identity is the provider, and this changes
++                // the row's identity is the endpoint, and this changes
 +                // nothing of the account, so the change is named explicitly
-+                balances[account.provider.rawValue] = state
-+                rebuild(changed: [account.provider.rawValue])
++                let key = Self.balanceKey(for: account)
++                balances[key] = state
++                rebuild(changed: [key])
 +            }
 +        }
 +    }
@@ -1441,7 +1454,7 @@ index e2446ce..36f068c 100644
          }
      }
  
-@@ -140,6 +209,13 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -140,6 +222,13 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
      }
  
      @objc private dynamic func regroup() {
@@ -1455,7 +1468,7 @@ index e2446ce..36f068c 100644
          if !loaded {
              sections = [(.status, [.status(.loading)])]
          } else if let failure, accounts.isEmpty {
-@@ -148,25 +224,30 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -148,25 +237,30 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
              let shown = query.isEmpty
                  ? accounts
                  : accounts.filter {
@@ -1493,7 +1506,7 @@ index e2446ce..36f068c 100644
      private func account(at indexPath: IndexPath) -> AgentAccount? {
          guard case let .account(account)? = dataSource.value(at: indexPath) else { return nil }
          return account
-@@ -198,34 +279,61 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -198,34 +292,61 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
          }
      }
  
@@ -1573,7 +1586,7 @@ index e2446ce..36f068c 100644
          if let expiresAt = account.expiresAt {
              let date = expiresAt.formatted(date: .abbreviated, time: .shortened)
              parts.append(expiresAt < Date() ? String(localized: "Expired \(date)") : String(localized: "Until \(date)"))
-@@ -233,6 +341,59 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -233,6 +354,59 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
          return parts.joined(separator: " · ")
      }
  
@@ -1605,7 +1618,7 @@ index e2446ce..36f068c 100644
 +    private func balanceBadge(for account: AgentAccount) -> ProviderBalanceBadge {
 +        guard account.signedIn, account.provider.kind == .openAICompatible else { return .hidden }
 +        guard ProviderMetaStore.meta(for: account.provider.rawValue).balanceEnabled else { return .hidden }
-+        switch balances[account.provider.rawValue] {
++        switch balances[Self.balanceKey(for: account)] {
 +        case let .some(.balance(balance)):
 +            return Self.badge(for: balance)
 +        case .some(.checking):
@@ -1633,7 +1646,7 @@ index e2446ce..36f068c 100644
      /// `…` with no circle, its menu read each time it opens.
      private func menuButton(_ account: AgentAccount) -> UIButton {
          let button = UIButton(type: .system)
-@@ -242,12 +403,12 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -242,12 +416,12 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
              completion(self?.accountActions(account) ?? [])
          }])
          button.frame = CGRect(x: 0, y: 0, width: 32, height: 44)
@@ -1648,7 +1661,7 @@ index e2446ce..36f068c 100644
              UIAction(
                  title: String(localized: "Edit"),
                  image: UIImage(systemName: account.isAPIKeyAccount ? "pencil" : "arrow.clockwise"),
-@@ -260,16 +421,34 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -260,16 +434,34 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
              ) { [weak self] _ in
                  self?.presentPageAsFormSheet(ModelActivationController(account: account))
              },
@@ -1692,7 +1705,7 @@ index e2446ce..36f068c 100644
      }
  
      override func tableView(_: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
-@@ -295,6 +474,57 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -295,6 +487,57 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
  
      // MARK: - Acting
  
@@ -1750,7 +1763,7 @@ index e2446ce..36f068c 100644
      private func signIn(_ account: AgentAccount) {
          let page = ProviderLoginController(account: account)
          page.onFinish = { [weak self] in self?.load() }
-@@ -304,11 +534,13 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -304,11 +547,13 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
          presentPageAsFormSheet(page)
      }
  
@@ -1767,7 +1780,7 @@ index e2446ce..36f068c 100644
          presentConfirmation(
              title: "Sign Out of \(name)?",
              message: "Agent sessions that use it stop working until you sign in again.",
-@@ -330,4 +562,69 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -330,4 +575,69 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
              }
          }
      }
@@ -2156,10 +2169,10 @@ index 0000000..7d9fe02
 +}
 diff --git a/Apelin/Interface/Settings/Accounts/ProviderBalance.swift b/Apelin/Interface/Settings/Accounts/ProviderBalance.swift
 new file mode 100644
-index 0000000..49f1bd1
+index 0000000..986b6a1
 --- /dev/null
 +++ b/Apelin/Interface/Settings/Accounts/ProviderBalance.swift
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,298 @@
 +import Foundation
 +
 +/// What an endpoint says is left on the key it was given.
@@ -2208,60 +2221,106 @@ index 0000000..49f1bd1
 +    ///
 +    /// `using` is the protocol picked in the endpoint's form. `auto` reads the
 +    /// host — DeepSeek and OpenRouter answer on paths of their own — and then
-+    /// tries the OpenAI billing pair, which most relays forward; the rest go
++    /// tries the routes an OpenAI-compatible gateway forwards; the rest go
 +    /// straight to the one route they name, which is what someone picks it
 +    /// for when the guessing lands on the wrong answer.
++    ///
++    /// Every base is tried: a relay served under a prefix keeps its billing
++    /// endpoints under that prefix too, and asking the bare origin there
++    /// answers 404 to everything.
 +    static func fetch(
 +        baseURL: String,
 +        apiKey: String,
 +        using picked: String = ProviderBalanceProtocol.automatic,
 +    ) async throws -> ProviderBalance {
 +        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-+        guard let root = root(of: trimmed) else { throw ProviderBalanceError.noEndpoint }
-+        let host = (root.host ?? "").lowercased()
++        let roots = roots(of: trimmed)
++        guard let first = roots.first else { throw ProviderBalanceError.noEndpoint }
++        let host = (first.host ?? "").lowercased()
 +
-+        switch picked {
-+        case ProviderBalanceProtocol.newAPI, ProviderBalanceProtocol.oneAPI:
-+            if let balance = try? await newAPI(root: root, key: apiKey) { return balance }
-+            throw ProviderBalanceError.unsupported
-+        case ProviderBalanceProtocol.deepSeek:
-+            return try await deepSeek(root: root, key: apiKey)
-+        case ProviderBalanceProtocol.openRouter:
-+            return try await openRouter(root: root, key: apiKey)
-+        case ProviderBalanceProtocol.openAI:
-+            return try await openAIBilling(root: root, key: apiKey)
-+        default:
-+            break
-+        }
-+
-+        if host.contains("deepseek"), let balance = try? await deepSeek(root: root, key: apiKey) {
-+            return balance
-+        }
-+        if host.contains("openrouter"), let balance = try? await openRouter(root: root, key: apiKey) {
-+            return balance
-+        }
-+        // the pair New-API and One-API both implement, which is what most
-+        // relays in front of them forward
-+        if let balance = try? await newAPI(root: root, key: apiKey) {
-+            return balance
-+        }
-+        if let balance = try? await openAIBilling(root: root, key: apiKey) {
-+            return balance
++        for root in roots {
++            if let balance = try? await attempt(root: root, host: host, key: apiKey, using: picked) {
++                return balance
++            }
 +        }
 +        throw ProviderBalanceError.unsupported
 +    }
 +
-+    /// `https://gateway.example.com/v1` as the site's own origin: billing
-+    /// lives beside the API, not under the versioned path the key talks to.
-+    private static func root(of baseURL: String) -> URL? {
++    /// One base, asked the way `picked` says, or the way the host suggests.
++    private static func attempt(
++        root: URL,
++        host: String,
++        key: String,
++        using picked: String,
++    ) async throws -> ProviderBalance {
++        switch picked {
++        case ProviderBalanceProtocol.newAPI, ProviderBalanceProtocol.oneAPI:
++            return try await newAPI(root: root, key: key)
++        case ProviderBalanceProtocol.deepSeek:
++            return try await deepSeek(root: root, key: key)
++        case ProviderBalanceProtocol.openRouter:
++            return try await openRouter(root: root, key: key)
++        case ProviderBalanceProtocol.openAI:
++            return try await openAIBilling(root: root, key: key)
++        default:
++            break
++        }
++
++        if host.contains("deepseek"), let balance = try? await deepSeek(root: root, key: key) {
++            return balance
++        }
++        if host.contains("openrouter"), let balance = try? await openRouter(root: root, key: key) {
++            return balance
++        }
++        // the pair New-API and One-API both implement, which is what most
++        // relays in front of them forward
++        if let balance = try? await newAPI(root: root, key: key) {
++            return balance
++        }
++        if let balance = try? await openAIBilling(root: root, key: key) {
++            return balance
++        }
++        return try await creditGrants(root: root, key: key)
++    }
++
++    /// The bases worth asking, most specific first.
++    ///
++    /// The key's own base URL is kept, minus the versioned tail it ends with:
++    /// `/v1` is where the chat API lives, and billing sits beside it. The bare
++    /// origin is the second try, for sites that serve billing from the root
++    /// whatever prefix the API uses.
++    private static func roots(of baseURL: String) -> [URL] {
 +        let candidate = baseURL.contains("://") ? baseURL : "https://" + baseURL
 +        guard var components = URLComponents(string: candidate),
 +              components.host?.isEmpty == false
-+        else { return nil }
-+        components.path = ""
++        else { return [] }
 +        components.query = nil
 +        components.fragment = nil
-+        return components.url
++
++        var path = components.path
++        while path.hasSuffix("/") { path.removeLast() }
++        for suffix in ["/v1", "/api/v1", "/openai/v1"] where path.hasSuffix(suffix) {
++            path.removeLast(suffix.count)
++            break
++        }
++
++        var result: [URL] = []
++        components.path = path
++        if let prefixed = components.url {
++            result.append(prefixed)
++        }
++        components.path = ""
++        if let origin = components.url, !result.contains(origin) {
++            result.append(origin)
++        }
++        return result
++    }
++
++    /// `root` with `path` appended, keeping whatever prefix the base carried.
++    private static func joined(_ root: URL, _ path: String) -> URL? {
++        var text = root.absoluteString
++        while text.hasSuffix("/") { text.removeLast() }
++        return URL(string: text + path)
 +    }
 +
 +    // MARK: - Routes
@@ -2270,28 +2329,31 @@ index 0000000..49f1bd1
 +    ///
 +    /// `quota` counts in 1/500000 of a dollar — the unit both projects use
 +    /// internally — and `used_quota` is what has been spent against it, so the
-+    /// pair gives both the remainder and the ceiling.
++    /// pair gives both the remainder and the ceiling. A site that reports only
++    /// the spend, or a key that is down to nothing, still answered the
++    /// question that was asked, so neither counts as the route having no
++    /// balance.
 +    private static func newAPI(root: URL, key: String) async throws -> ProviderBalance {
-+        guard let url = URL(string: "/api/user/self", relativeTo: root) else {
-+            throw ProviderBalanceError.noEndpoint
-+        }
++        guard let url = joined(root, "/api/user/self") else { throw ProviderBalanceError.noEndpoint }
 +        let body = try object(of: try await payload(at: url, key: key))
 +        guard let user = body["data"] as? [String: Any] else { throw ProviderBalanceError.unsupported }
-+        let quota = number(user["quota"])
++        // `quota` is the remainder in both projects; older builds name it
++        // `remain_quota`.
++        let anyQuota = user["quota"] ?? user["remain_quota"]
++        guard anyQuota != nil || user["used_quota"] != nil else { throw ProviderBalanceError.unsupported }
++        let quota = number(anyQuota)
 +        let used = number(user["used_quota"])
 +        let total = (quota + used) / 500_000
-+        // a key with nothing on it either way is not a balance anyone can use
-+        guard total > 0 else { throw ProviderBalanceError.unsupported }
 +        return ProviderBalance(
 +            remaining: max(0, quota / 500_000),
 +            currency: "USD",
-+            limit: total,
++            limit: total > 0 ? total : nil,
 +            route: "/api/user/self",
 +        )
 +    }
 +
 +    private static func openAIBilling(root: URL, key: String) async throws -> ProviderBalance {
-+        guard let subscriptionURL = URL(string: "/v1/dashboard/billing/subscription", relativeTo: root) else {
++        guard let subscriptionURL = joined(root, "/v1/dashboard/billing/subscription") else {
 +            throw ProviderBalanceError.noEndpoint
 +        }
 +        let subscription = try object(of: try await payload(at: subscriptionURL, key: key))
@@ -2307,10 +2369,9 @@ index 0000000..49f1bd1
 +        let start = formatter.string(from: now.addingTimeInterval(-86_400 * 365))
 +        let end = formatter.string(from: now.addingTimeInterval(86_400))
 +
-+        guard var components = URLComponents(
-+            url: URL(string: "/v1/dashboard/billing/usage", relativeTo: root) ?? root,
-+            resolvingAgainstBaseURL: false,
-+        ) else { throw ProviderBalanceError.noEndpoint }
++        guard let usageBase = joined(root, "/v1/dashboard/billing/usage"),
++              var components = URLComponents(url: usageBase, resolvingAgainstBaseURL: false)
++        else { throw ProviderBalanceError.noEndpoint }
 +        components.queryItems = [
 +            URLQueryItem(name: "start_date", value: start),
 +            URLQueryItem(name: "end_date", value: end),
@@ -2319,7 +2380,7 @@ index 0000000..49f1bd1
 +        let usage = try object(of: try await payload(at: usageURL, key: key))
 +        // `total_usage` is in cents, the one place OpenAI's billing API is
 +        // not in dollars.
-+        let used = (usage["total_usage"] as? Double ?? 0) / 100
++        let used = number(usage["total_usage"]) / 100
 +
 +        guard limit > 0 || used > 0 else { throw ProviderBalanceError.unsupported }
 +        return ProviderBalance(
@@ -2330,10 +2391,26 @@ index 0000000..49f1bd1
 +        )
 +    }
 +
-+    private static func deepSeek(root: URL, key: String) async throws -> ProviderBalance {
-+        guard let url = URL(string: "/user/balance", relativeTo: root) else {
++    /// The older of OpenAI's two billing shapes, which several relays went on
++    /// forwarding after the newer pair was retired.
++    private static func creditGrants(root: URL, key: String) async throws -> ProviderBalance {
++        guard let url = joined(root, "/dashboard/billing/credit_grants") else {
 +            throw ProviderBalanceError.noEndpoint
 +        }
++        let body = try object(of: try await payload(at: url, key: key))
++        guard let grants = body["total_available"] ?? body["total_granted"] else {
++            throw ProviderBalanceError.unsupported
++        }
++        return ProviderBalance(
++            remaining: max(0, number(grants)),
++            currency: "USD",
++            limit: (body["total_granted"] as? NSNumber)?.doubleValue,
++            route: "/dashboard/billing/credit_grants",
++        )
++    }
++
++    private static func deepSeek(root: URL, key: String) async throws -> ProviderBalance {
++        guard let url = joined(root, "/user/balance") else { throw ProviderBalanceError.noEndpoint }
 +        let body = try object(of: try await payload(at: url, key: key))
 +        guard let infos = body["balance_infos"] as? [[String: Any]],
 +              let first = infos.first,
@@ -2349,13 +2426,11 @@ index 0000000..49f1bd1
 +    }
 +
 +    private static func openRouter(root: URL, key: String) async throws -> ProviderBalance {
-+        guard let url = URL(string: "/api/v1/credits", relativeTo: root) else {
-+            throw ProviderBalanceError.noEndpoint
-+        }
++        guard let url = joined(root, "/api/v1/credits") else { throw ProviderBalanceError.noEndpoint }
 +        let body = try object(of: try await payload(at: url, key: key))
 +        guard let credits = body["data"] as? [String: Any] else { throw ProviderBalanceError.unsupported }
-+        let total = credits["total_credits"] as? Double ?? 0
-+        let used = credits["total_usage"] as? Double ?? 0
++        let total = number(credits["total_credits"])
++        let used = number(credits["total_usage"])
 +        guard total > 0 else { throw ProviderBalanceError.unsupported }
 +        return ProviderBalance(
 +            remaining: max(0, total - used),
@@ -10782,7 +10857,7 @@ index 3a94bfc..c0c5315 100644
        "localizations" : {
          "ar" : {
 diff --git a/Configuration/Version.xcconfig b/Configuration/Version.xcconfig
-index 068eb46..86a665b 100644
+index 068eb46..76c4a7e 100644
 --- a/Configuration/Version.xcconfig
 +++ b/Configuration/Version.xcconfig
 @@ -4,6 +4,11 @@
@@ -10797,8 +10872,8 @@ index 068eb46..86a665b 100644
  
 -MARKETING_VERSION = 0.4.7
 -CURRENT_PROJECT_VERSION = 40
-+MARKETING_VERSION = 0.5.4
-+CURRENT_PROJECT_VERSION = 49
++MARKETING_VERSION = 0.5.5
++CURRENT_PROJECT_VERSION = 50
 diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
 index fe2f6d7..272ef5b 100644
 --- a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift

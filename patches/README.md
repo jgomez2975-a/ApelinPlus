@@ -17,7 +17,7 @@ fork 一份两千多个文件的仓库，上游一更新就得 rebase，而且�
 | patch | 做什么 | 风险 |
 |---|---|---|
 | `0000-lower-ios-sdk-tier` | `IOS_SDK_TIER 27.1 → 26.5`，让 `macos-26` 镜像（Xcode 26.6）能过 `sdk-tier` | 低。只有代码真用了 iOS 27 API 才会炸，`xcodebuild` 会直接报 |
-| `0001-local-features` | 四项功能 + 六屏界面：中转站标签与配色、上下文压缩修复、会话内搜索、余额查询与详情页、聊天页上下文条与检查器；版本 `0.4.7 (40) → 0.5.4 (49)` | 中。17 个文件、6 个新文件，见下 |
+| `0001-local-features` | 四项功能 + 六屏界面：中转站标签与配色、上下文压缩修复、会话内搜索、余额查询与详情页、聊天页上下文条与检查器；版本 `0.4.7 (40) → 0.5.5 (50)` | 中。17 个文件、6 个新文件，见下 |
 
 `0001` 曾是 `0001-endpoint-names`（标签）+ `0002-local-version`（版本号）两个补丁。四项功能里有三项改到了同一批文件（`ChatController`、`ModelProvidersController`），拆开生成时后一个补丁的上下文会依赖前一个已应用，合并成一个补丁反而更稳。
 
@@ -216,7 +216,14 @@ git diff --cached > ../apelin-plus/patches/0001-local-features.patch
 
 `git archive v0.4.7` 导出一份干净树，`git init` 后 `git apply --check` 两个补丁，都 `OK`。再实际 apply 一遍，确认：
 
-- `Configuration/Version.xcconfig` 落到 `0.5.4` / `49`
+- `Configuration/Version.xcconfig` 落到 `0.5.5` / `50`
+
+#### 5d. 余额识别（0.5.5）
+
+- **多中转站互相覆盖**：`balances` 原按 `provider.rawValue` 存，而所有 OpenAI 兼容中转站共享同一个 rawValue，后查到的结果覆盖前面的。改为实例键 `provider.rawValue|host`。
+- **子路径站点 404**：原来把 baseURL 的 path 整个清空再拼 `/api/user/self`，挂在 `https://host/prefix/v1` 下的中转站因此全部 404。改为先按「去掉 /v1 尾巴的 baseURL」再按「裸 origin」各试一遍。
+- **余额为 0 被判失败**：`/api/user/self` 原来要求 `(quota+used) > 0`，账户余额为 0 或站点只报 used_quota 时被当成"识别不出"。改为结构对就接受。
+- **补 `/dashboard/billing/credit_grants`**（OpenAI 旧计费接口，部分中转仍转发），并兼容 `remain_quota` 字段名。
 
 #### 5c. 启动闪退与推理折叠（0.5.3 / 0.5.4）
 
