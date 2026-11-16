@@ -22,6 +22,11 @@ on:
         description: 'Upstream ref (branch or tag)'
         required: true
         default: main
+      runner:
+        description: 'Runner image — macos-26 is stable, xcode-27 matches upstream but is a preview that gets reclaimed'
+        type: choice
+        options: [macos-26, xcode-27]
+        default: macos-26
       apply_patches:
         description: 'Apply patches/*.patch from this repo after cloning'
         type: boolean
@@ -33,7 +38,10 @@ on:
 
 concurrency:
   group: deb-${{ github.ref }}
-  cancel-in-progress: true
+  # Not cancel-in-progress: a build that has already spent fifteen minutes
+  # is worth more than the freshness of the next one, and an accidental
+  # double click should not throw the first away.
+  cancel-in-progress: false
 
 env:
   UPSTREAM: https://github.com/wwg135/Apelin.git
@@ -41,19 +49,20 @@ env:
 jobs:
   deb:
     name: make deb (${{ inputs.flavor }})
-    # `xcode-27`, not `macos-26`.
+    # Two images, two trade-offs:
     #
-    # Apelin pins IOS_SDK_TIER 27.1 in its Makefile, and `sdk-tier` exits 69
-    # when the selected Xcode is older. The macos-26 image tops out at Xcode
-    # 26.6 (iOS SDK 26.5) — that is the failure this job produced on its
-    # first run. The xcode-27 image carries 27.0, 27.1 (default) and 27.2,
-    # with iphoneos27.1 present, which is the exact SDK the project asks
-    # for.
+    # `macos-26` — stable GA, Xcode 26.6 with iOS SDK 26.5. Upstream pins
+    # IOS_SDK_TIER 27.1 and its `sdk-tier` target exits 69 below that, so
+    # this image needs patches/0000-lower-ios-sdk-tier.patch. The package
+    # that comes out is linked against 26.5 rather than 27.1, which matters
+    # only if the code uses an iOS 27 API — the build says so if it does.
     #
-    # It is a public preview, so it can be slower to schedule and can
-    # disappear; if this label stops resolving, fall back to macos-26 plus
-    # an Xcode selection step and lower IOS_SDK_TIER in a patch.
-    runs-on: xcode-27
+    # `xcode-27` — macOS 27 with Xcode 27.1 (iOS SDK 27.1), which is what
+    # upstream asks for, no patch needed. It is a public preview: one
+    # attempt here was reclaimed two minutes into xcodebuild with
+    # "The operation was canceled". Green when it holds, gone when it does
+    # not.
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 60
     steps:
       - name: Checkout builder (for patches)
@@ -66,8 +75,6 @@ jobs:
           xcode-select -p
           echo "iPhoneOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
           sw_vers
-          # Everything the project's `check` target looks for, printed up
-          # front so a missing one is obvious before the build starts.
           ls -d /Applications/Xcode*.app 2>/dev/null || true
 
       - name: Clone upstream
