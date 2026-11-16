@@ -1,6 +1,8 @@
 # SwiftPM
 .build/
 .swiftpm/
+.build-ios/
+.build-ios2/
 Package.resolved
 
 # Xcode

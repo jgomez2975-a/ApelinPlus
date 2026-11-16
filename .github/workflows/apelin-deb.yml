@@ -1,0 +1,132 @@
+name: Apelin .deb (upstream)
+
+# Builds the real Apelin package on a GitHub macOS runner, so no Mac is
+# needed anywhere in the loop. Clones upstream, optionally applies the
+# patches in `patches/`, runs the project's own Makefile, uploads the .deb.
+#
+# This is deliberately a separate workflow from `ci.yml`: that one gates
+# the ApelinPlus package, this one produces an installable artifact. They
+# fail for different reasons and should not block each other.
+#
+# Manual only. A .deb build is 10-20 macOS minutes; do not put it on push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      flavor:
+        description: 'Jailbreak layout'
+        type: choice
+        options: [roothide, rootless, both]
+        default: roothide
+      ref:
+        description: 'Upstream ref (branch or tag)'
+        required: true
+        default: main
+      apply_patches:
+        description: 'Apply patches/*.patch from this repo after cloning'
+        type: boolean
+        default: true
+      skip_checks:
+        description: 'SKIP_HARNESS=1 (required: the device harness needs a phone)'
+        type: boolean
+        default: true
+
+concurrency:
+  group: deb-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UPSTREAM: https://github.com/wwg135/Apelin.git
+
+jobs:
+  deb:
+    name: make deb (${{ inputs.flavor }})
+    # macOS 26: Apelin pins IOS_SDK_TIER 27.1, so it needs the SDK that
+    # ships with Xcode 27. If the image only carries Xcode 26, the
+    # `sdk-tier` target fails fast with exit 69 and names the SDK it sees —
+    # that error is the signal to switch this to `xcode-27`.
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Checkout builder (for patches)
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          echo "iPhoneOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+          sw_vers
+
+      - name: Clone upstream
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ inputs.ref }}" "$UPSTREAM" upstream
+          cd upstream
+          git log --oneline -1
+          echo "files: $(git ls-files | wc -l)"
+
+      - name: Apply patches
+        if: ${{ inputs.apply_patches }}
+        run: |
+          set -euo pipefail
+          cd upstream
+          shopt -s nullglob
+          patches=("$GITHUB_WORKSPACE"/patches/*.patch)
+          if [ ${#patches[@]} -eq 0 ]; then
+            echo "No patches in patches/ — building pristine upstream."
+            exit 0
+          fi
+          for p in "${patches[@]}"; do
+            echo "--- applying $(basename "$p")"
+            git apply --3way --verbose "$p"
+          done
+          git status --short
+
+      - name: Packaging tools
+        run: |
+          set -uo pipefail
+          # dpkg provides dpkg-deb; zstd is what package-deb.sh compresses
+          # with; ldid is what signs the Mach-O binaries for a jailbroken
+          # device. Each is checked by the project's own `check` target.
+          brew install dpkg zstd || true
+          brew install ldid || brew install ProcursusTeam/ldid/ldid || true
+          for tool in ldid dpkg-deb zstd xcodebuild; do
+            if command -v "$tool" >/dev/null; then
+              echo "ok: $tool -> $(command -v "$tool")"
+            else
+              echo "::error::missing $tool"
+            fi
+          done
+
+      - name: Build and package
+        run: |
+          set -uo pipefail
+          cd upstream
+          SKIP=""
+          if [ "${{ inputs.skip_checks }}" = "true" ]; then SKIP="SKIP_HARNESS=1"; fi
+
+          case "${{ inputs.flavor }}" in
+            roothide) TARGET=deb-roothide ;;
+            rootless) TARGET=deb-rootless ;;
+            both)     TARGET=deb-all ;;
+          esac
+
+          echo "=== make $TARGET $SKIP ==="
+          make "$TARGET" $SKIP
+
+      - name: List packages
+        if: always()
+        run: |
+          # BSD find on macOS has no -printf; ls is enough here.
+          find upstream/build -name '*.deb' -exec ls -lh {} \; 2>/dev/null || echo "no .deb produced"
+
+      - name: Upload debs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apelin-${{ inputs.flavor }}-${{ github.run_number }}
+          path: |
+            upstream/build/Packages/*.deb
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0

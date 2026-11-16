@@ -1,0 +1,7 @@
+# Swift sources are LF everywhere; a CRLF working copy on Windows would
+# show every file as rewritten the moment CI touches it.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.zip binary

@@ -43,24 +43,47 @@ jobs:
     # macOS: `Security` and `Foundation` differ enough between the two for
     # this to be worth its own job.
     #
+    # macOS 26 rather than 15 on purpose: Apelin's Makefile pins
+    # IOS_SDK_TIER 27.1, so iOS 27 is what this code will actually be
+    # linked into. A green line here means it compiles against the SDK the
+    # app ships with.
+    #
     # SwiftPM with an explicit iOS SDK rather than `xcodebuild -scheme`:
     # a bare package has no committed scheme, and the scheme Xcode invents
     # sometimes comes out named differently than the package. `--sdk` has
     # no such moving part.
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          echo "iPhoneOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+          xcode-select -p
+
       - name: Build for iphoneos
         run: |
-          set -euo pipefail
+          set -uo pipefail
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          TRIPLE="arm64-apple-ios16.0"
           echo "SDK: $SDK"
-          swift build \
-            --sdk "$SDK" \
-            -Xswiftc -target -Xswiftc arm64-apple-ios16.0 \
-            --build-path .build-ios
+          echo "TRIPLE: $TRIPLE"
+
+          echo "--- attempt 1: SwiftPM cross-compile ---"
+          if swift build --sdk "$SDK" --triple "$TRIPLE" --build-path .build-ios; then
+            echo "iOS slice OK"
+            exit 0
+          fi
+
+          echo "--- attempt 2: swiftc target override ---"
+          # Only reached when SwiftPM's own cross-compile plumbing refuses
+          # the triple. A genuine source error fails this too, which is the
+          # point.
+          swift build --sdk "$SDK" \
+            -Xswiftc -target -Xswiftc "$TRIPLE" \
+            --build-path .build-ios2
 
   # Swift 6 language mode is on through the tools version, but a warning
   # is not an error by default. This job makes the strict-concurrency and
