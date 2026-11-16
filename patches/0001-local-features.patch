@@ -1,0 +1,1145 @@
+diff --git a/Apelin/Interface/Chats/ChatController.swift b/Apelin/Interface/Chats/ChatController.swift
+index ea62ed9..934f51c 100644
+--- a/Apelin/Interface/Chats/ChatController.swift
++++ b/Apelin/Interface/Chats/ChatController.swift
+@@ -107,7 +107,19 @@ final class ChatController: UIViewController {
+                 anchor: more,
+                 onPrepareDistribution: { [weak self] prompt in self?.sendPrompt(prompt) },
+                 onDelete: { [weak self] id in self?.onDelete?(id) },
+-                completion: completion,
++                completion: { [weak self] items in
++                    // Search comes first: a conversation long enough to need
++                    // this menu's other entries is one long enough to search.
++                    guard let self else { completion(items); return }
++                    var all: [UIMenuElement] = [
++                        UIAction(
++                            title: String(localized: "Search"),
++                            image: UIImage(systemName: "magnifyingglass"),
++                        ) { [weak self] _ in self?.searchConversation() },
++                    ]
++                    all.append(contentsOf: items)
++                    completion(all)
++                },
+             )
+         }])
+         more.accessibilityLabel = String(localized: "More")
+@@ -231,6 +243,11 @@ final class ChatController: UIViewController {
+         }
+     }
+ 
++    /// The open conversation, looked through by text.
++    private func searchConversation() {
++        presentPageAsFormSheet(ChatSearchController(messages: messages))
++    }
++
+     @objc dynamic private func replaceMessageList() {
+         let contentInset = messageList.contentInset
+         let indicatorInset = messageList.verticalScrollIndicatorInsets
+@@ -677,7 +694,11 @@ final class ChatController: UIViewController {
+                 }
+                 let selected = ComposerModelSelection.current
+                 completion(accounts.map { account in
+-                    UIMenu(title: account.account ?? account.provider.displayName, options: .displayInline,
++                    // An endpoint is picked by the name it was given, then by
++                    // the host it was signed in to: several of them share the
++                    // provider's one name, and this is where they are chosen.
++                    UIMenu(title: ProviderLabel.name(of: account.provider) ?? account.account ?? account.provider.displayName,
++                           options: .displayInline,
+                            children: (account.models ?? []).map { model in
+                                let checked = account.provider == selected?.provider && model == selected?.model
+                                return UIAction(title: model, state: checked ? .on : .off) { _ in
+diff --git a/Apelin/Interface/Chats/ChatSearchController.swift b/Apelin/Interface/Chats/ChatSearchController.swift
+new file mode 100644
+index 0000000..f7a2e66
+--- /dev/null
++++ b/Apelin/Interface/Chats/ChatSearchController.swift
+@@ -0,0 +1,194 @@
++import SnapKit
++import Then
++import UIKit
++
++/// Looks through the conversation that is open for a line of text.
++///
++/// A session that has run for hours can only be read back by scrolling it,
++/// and the line someone wants is usually far above the newest one. This
++/// lists every message whose text holds the query, with the line the hit
++/// sits on, and opens one as a page that can be copied.
++///
++/// Only what a person or the model wrote is searched: an activity row is a
++/// tool call, and a compaction row is the summary's own prose — neither is a
++/// line anyone remembers reading.
++final class ChatSearchController: UITableViewController, UISearchResultsUpdating {
++    private let messages: [ChatMessage]
++    private var matches: [ChatMessage] = []
++    /// What a row shows: the query with the words around it, cut short, so a
++    /// hit deep inside a long reply is readable without opening it.
++    private var excerpts: [UUID: String] = [:]
++    private let search = UISearchController(searchResultsController: nil)
++    private let emptyLabel = UILabel()
++
++    init(messages: [ChatMessage]) {
++        self.messages = messages.filter { $0.role == .user || $0.role == .assistant }
++        super.init(style: .insetGrouped)
++    }
++
++    @available(*, unavailable)
++    required init?(coder _: NSCoder) {
++        fatalError("Use init(messages:)")
++    }
++
++    override func viewDidLoad() {
++        super.viewDidLoad()
++        title = String(localized: "Search")
++        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "match")
++        tableView.rowHeight = UITableView.automaticDimension
++        tableView.estimatedRowHeight = 64
++
++        search.searchResultsUpdater = self
++        search.obscuresBackgroundDuringPresentation = false
++        search.searchBar.placeholder = String(localized: "Search")
++        search.searchBar.autocapitalizationType = .none
++        search.searchBar.autocorrectionType = .no
++        search.searchBar.accessibilityLabel = String(localized: "Search")
++        navigationItem.searchController = search
++        navigationItem.hidesSearchBarWhenScrolling = false
++        definesPresentationContext = true
++
++        emptyLabel.text = String(localized: "No Results")
++        emptyLabel.font = .preferredFont(forTextStyle: .body)
++        emptyLabel.adjustsFontForContentSizeCategory = true
++        emptyLabel.textColor = .secondaryLabel
++        emptyLabel.textAlignment = .center
++        emptyLabel.numberOfLines = 0
++        emptyLabel.isHidden = true
++        // The table's own background rather than a subview of it: a label
++        // added to a table view scrolls with the rows, and this one belongs
++        // to the empty page, not to the list.
++        emptyLabel.backgroundColor = .clear
++        tableView.backgroundView = emptyLabel
++    }
++
++    override func viewDidAppear(_ animated: Bool) {
++        super.viewDidAppear(animated)
++        // The page exists to take a query; a reader who opened it and has to
++        // tap the field first is one tap from closing it again instead.
++        search.searchBar.becomeFirstResponder()
++    }
++
++    // MARK: - Searching
++
++    func updateSearchResults(for searchController: UISearchController) {
++        let query = (searchController.searchBar.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
++        guard !query.isEmpty else {
++            matches = []
++            excerpts = [:]
++            emptyLabel.isHidden = true
++            tableView.reloadData()
++            return
++        }
++
++        var found: [ChatMessage] = []
++        var notes: [UUID: String] = [:]
++        for message in messages {
++            guard let range = message.text.range(
++                of: query,
++                options: [.caseInsensitive, .diacriticInsensitive],
++            ) else { continue }
++            found.append(message)
++            notes[message.id] = Self.excerpt(of: message.text, around: range)
++        }
++        matches = found
++        excerpts = notes
++        emptyLabel.isHidden = !found.isEmpty
++        tableView.reloadData()
++    }
++
++    /// The words around `range`, at most `limit` characters to each side, on
++    /// one line, with an ellipsis where it was cut.
++    private static func excerpt(
++        of text: String,
++        around range: Range<String.Index>,
++        limit: Int = 90,
++    ) -> String {
++        let lower = text.index(range.lowerBound, offsetBy: -limit, limitedBy: text.startIndex)
++            ?? text.startIndex
++        let upper = text.index(range.upperBound, offsetBy: limit, limitedBy: text.endIndex)
++            ?? text.endIndex
++        var piece = String(text[lower ..< upper])
++            .replacingOccurrences(of: "\n", with: " ")
++            .replacingOccurrences(of: "\t", with: " ")
++        while piece.contains("  ") {
++            piece = piece.replacingOccurrences(of: "  ", with: " ")
++        }
++        piece = piece.trimmingCharacters(in: .whitespaces)
++        if lower > text.startIndex { piece = "…" + piece }
++        if upper < text.endIndex { piece += "…" }
++        return piece
++    }
++
++    // MARK: - Listing
++
++    override func numberOfSections(in _: UITableView) -> Int {
++        1
++    }
++
++    override func tableView(_: UITableView, numberOfRowsInSection _: Int) -> Int {
++        matches.count
++    }
++
++    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
++        let cell = tableView.dequeueReusableCell(withIdentifier: "match", for: indexPath)
++        let message = matches[indexPath.row]
++        var content = cell.defaultContentConfiguration()
++        content.text = excerpts[message.id] ?? message.text
++        content.textProperties.numberOfLines = 3
++        content.textProperties.font = .preferredFont(forTextStyle: .body)
++        cell.contentConfiguration = content
++        return cell
++    }
++
++    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
++        tableView.deselectRow(at: indexPath, animated: true)
++        let message = matches[indexPath.row]
++        navigationController?.pushViewController(
++            ChatSearchTextController(text: message.text),
++            animated: true,
++        )
++    }
++}
++
++/// One message, whole, as a page that can be read and copied.
++final class ChatSearchTextController: UIViewController {
++    private let text: String
++    private let textView = UITextView()
++
++    init(text: String) {
++        self.text = text
++        super.init(nibName: nil, bundle: nil)
++    }
++
++    @available(*, unavailable)
++    required init?(coder _: NSCoder) {
++        fatalError("Use init(text:)")
++    }
++
++    override func viewDidLoad() {
++        super.viewDidLoad()
++        title = String(localized: "Contents")
++        view.backgroundColor = .pageBackground
++
++        textView.text = text
++        textView.font = .preferredFont(forTextStyle: .body)
++        textView.adjustsFontForContentSizeCategory = true
++        textView.isEditable = false
++        textView.alwaysBounceVertical = true
++        textView.backgroundColor = .clear
++        textView.textContainerInset = UIEdgeInsets(top: 8, left: 0, bottom: 24, right: 0)
++        view.addSubview(textView)
++        textView.snp.makeConstraints { make in
++            make.edges.equalTo(view.safeAreaLayoutGuide).inset(16)
++        }
++
++        navigationItem.rightBarButtonItem = UIBarButtonItem(
++            image: UIImage(systemName: "doc.on.doc"),
++            primaryAction: UIAction { [weak self] _ in
++                guard let self else { return }
++                UIPasteboard.general.string = text
++            },
++        ).then { $0.accessibilityLabel = String(localized: "Copy") }
++    }
++}
+diff --git a/Apelin/Interface/Settings/Accounts/ModelProvidersController.swift b/Apelin/Interface/Settings/Accounts/ModelProvidersController.swift
+index e2446ce..91e15e9 100644
+--- a/Apelin/Interface/Settings/Accounts/ModelProvidersController.swift
++++ b/Apelin/Interface/Settings/Accounts/ModelProvidersController.swift
+@@ -140,6 +140,13 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+     }
+ 
+     @objc private dynamic func regroup() {
++        rebuild(changed: [])
++    }
++
++    /// Rebuilds the sections. `changed` names rows whose visible text changed
++    /// while their identity did not: a name lives outside the account, so the
++    /// snapshot comes out identical and only this can redraw the row.
++    private func rebuild(changed: Set<String>) {
+         if !loaded {
+             sections = [(.status, [.status(.loading)])]
+         } else if let failure, accounts.isEmpty {
+@@ -148,8 +155,10 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+             let shown = query.isEmpty
+                 ? accounts
+                 : accounts.filter {
+-                    $0.provider.displayName.localizedStandardContains(query)
+-                        // an endpoint is found by the host it was signed in to as well
++                    // a name the person gave an endpoint is what they will
++                    // search for; the provider's own name still matches, and
++                    // so does the host it was signed in to
++                    ProviderLabel.displayName(of: $0.provider).localizedStandardContains(query)
+                         || ($0.account ?? "").localizedStandardContains(query)
+                 }
+             let groups: [(Group, [AgentAccount])] = [
+@@ -162,11 +171,9 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+                 sections = [(.status, [.status(.noResults)])]
+             }
+         }
+-        dataSource.update(sections)
++        dataSource.update(sections, changedItems: changed)
+     }
+ 
+-    // MARK: - Table
+-
+     private func account(at indexPath: IndexPath) -> AgentAccount? {
+         guard case let .account(account)? = dataSource.value(at: indexPath) else { return nil }
+         return account
+@@ -199,7 +206,10 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+     }
+ 
+     /// The provider's mark and name on one line; signed in, who as under the
+-    /// name and a `…` menu at the end.
++    /// name and a `…` menu at the end. An endpoint signed in to carries the
++    /// name it was given, with its host still under it; an endpoint that is
++    /// only on offer keeps the provider's own name, so an empty slot cannot
++    /// read as one that is already set up.
+     private func accountCell(_ account: AgentAccount) -> UITableViewCell {
+         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+         var content: UIListContentConfiguration
+@@ -215,7 +225,9 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+             content = .cell()
+             cell.accessoryType = .disclosureIndicator
+         }
+-        content.text = account.provider.displayName
++        content.text = account.signedIn
++            ? ProviderLabel.displayName(of: account.provider)
++            : account.provider.displayName
+         content.textProperties.numberOfLines = 1
+         content.image = account.provider.icon
+         content.imageProperties.maximumSize = CGSize(width: 29, height: 29)
+@@ -242,12 +254,12 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+             completion(self?.accountActions(account) ?? [])
+         }])
+         button.frame = CGRect(x: 0, y: 0, width: 32, height: 44)
+-        button.accessibilityLabel = String(localized: "\(account.provider.displayName) Options")
++        button.accessibilityLabel = String(localized: "\(ProviderLabel.displayName(of: account.provider)) Options")
+         return button
+     }
+ 
+     private func accountActions(_ account: AgentAccount) -> [UIMenuElement] {
+-        [
++        var actions: [UIMenuElement] = [
+             UIAction(
+                 title: String(localized: "Edit"),
+                 image: UIImage(systemName: account.isAPIKeyAccount ? "pencil" : "arrow.clockwise"),
+@@ -260,16 +272,34 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+             ) { [weak self] _ in
+                 self?.presentPageAsFormSheet(ModelActivationController(account: account))
+             },
+-            UIMenu(options: .displayInline, children: [
+-                UIAction(
+-                    title: String(localized: "Sign Out"),
+-                    image: UIImage(systemName: "rectangle.portrait.and.arrow.right"),
+-                    attributes: .destructive,
+-                ) { [weak self] _ in
+-                    self?.confirmSignOut(account)
+-                },
+-            ]),
+         ]
++        // Only an endpoint can be one of several sharing one name. Every other
++        // provider is alone here, so a name would add nothing and would make
++        // the name a bug report has to use harder to match.
++        if account.provider.kind == .openAICompatible {
++            actions.append(UIAction(
++                title: String(localized: "Rename"),
++                image: UIImage(systemName: "tag"),
++            ) { [weak self] _ in
++                self?.rename(account)
++            })
++            actions.append(UIAction(
++                title: String(localized: "Balance"),
++                image: UIImage(systemName: "creditcard"),
++            ) { [weak self] _ in
++                self?.checkBalance(account)
++            })
++        }
++        actions.append(UIMenu(options: .displayInline, children: [
++            UIAction(
++                title: String(localized: "Sign Out"),
++                image: UIImage(systemName: "rectangle.portrait.and.arrow.right"),
++                attributes: .destructive,
++            ) { [weak self] _ in
++                self?.confirmSignOut(account)
++            },
++        ]))
++        return actions
+     }
+ 
+     override func tableView(_: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
+@@ -304,11 +334,13 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+         presentPageAsFormSheet(page)
+     }
+ 
+-    /// An OpenAI-compatible endpoint is named by its host: there can be
+-    /// several, all with the provider's one name.
++    /// An OpenAI-compatible endpoint answers to the name it was given, then
++    /// to its host: there can be several, all with the provider's one name.
+     private func confirmSignOut(_ account: AgentAccount) {
+         let provider = account.provider
+-        let name = provider.kind == .openAICompatible ? account.account ?? provider.displayName : provider.displayName
++        let name = ProviderLabel.name(of: provider)
++            ?? (provider.kind == .openAICompatible ? account.account : nil)
++            ?? provider.displayName
+         presentConfirmation(
+             title: "Sign Out of \(name)?",
+             message: "Agent sessions that use it stop working until you sign in again.",
+@@ -330,4 +362,59 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+             }
+         }
+     }
++
++    /// Gives an endpoint a name of its own, or takes the name away again. The
++    /// host stays under the name either way, so a name that turns out to be
++    /// wrong is readable next to what it actually points at.
++    private func rename(_ account: AgentAccount) {
++        let alert = UIAlertController(title: String(localized: "Rename"), message: nil, preferredStyle: .alert)
++        alert.addTextField { field in
++            field.text = ProviderLabel.name(of: account.provider)
++            field.placeholder = account.account ?? account.provider.displayName
++            field.autocapitalizationType = .words
++            field.clearButtonMode = .whileEditing
++            field.accessibilityLabel = String(localized: "Name")
++        }
++        alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
++        alert.addAction(UIAlertAction(title: String(localized: "Save"), style: .default) { [weak self, weak alert] _ in
++            guard let self else { return }
++            ProviderLabel.setName(alert?.textFields?.first?.text, for: account.provider)
++            // The row keeps its identity — that is the provider — so the name
++            // has to be named as the change or the cell is never drawn again.
++            self.rebuild(changed: [account.provider.rawValue])
++        })
++        present(alert, animated: true)
++    }
++
++    /// What the endpoint says is left on the key this endpoint was signed in
++    /// with.
++    ///
++    /// The key is read back through the same configuration the editing form
++    /// opens with — it never leaves the host except to the provider it
++    /// belongs to, and it is not written anywhere by this. A route that keeps
++    /// balance behind a login answers nothing to a key, which is said as no
++    /// balance rather than as a failure, so a relay that cannot be asked does
++    /// not read as one that broke.
++    private func checkBalance(_ account: AgentAccount) {
++        Task { [weak self] in
++            guard let self else { return }
++            do {
++                let configuration = try await ApelinService.app.agentAPIConfiguration(
++                    provider: account.provider,
++                )
++                let key = (configuration.values["apiKey"] ?? "")
++                    .trimmingCharacters(in: .whitespacesAndNewlines)
++                let base = (configuration.values["baseUrl"] ?? "")
++                    .trimmingCharacters(in: .whitespacesAndNewlines)
++                guard !key.isEmpty, !base.isEmpty else {
++                    presentNotice(title: "Balance", message: "This endpoint does not report a balance.")
++                    return
++                }
++                let balance = try await ProviderBalanceLookup.fetch(baseURL: base, apiKey: key)
++                presentNotice(title: "Balance", message: balance.described)
++            } catch {
++                presentNotice(title: "Balance", message: "This endpoint does not report a balance.")
++            }
++        }
++    }
+ }
+diff --git a/Apelin/Interface/Settings/Accounts/ProviderBalance.swift b/Apelin/Interface/Settings/Accounts/ProviderBalance.swift
+new file mode 100644
+index 0000000..6e29209
+--- /dev/null
++++ b/Apelin/Interface/Settings/Accounts/ProviderBalance.swift
+@@ -0,0 +1,169 @@
++import Foundation
++
++/// What an endpoint says is left on the key it was given.
++///
++/// Only the routes that answer a number without a browser session can be
++/// asked: an OpenAI-compatible gateway's billing endpoints, DeepSeek's own
++/// balance and OpenRouter's credits. A relay that keeps balance behind a
++/// login page answers 401 or 404 to the key — that is the route having
++/// nothing to say, not the key being wrong, so it is reported as no balance
++/// rather than as a failed check.
++struct ProviderBalance: Sendable {
++    let remaining: Double
++    let currency: String
++    /// What the key started with, when the endpoint says so.
++    let limit: Double?
++
++    /// `$16.79`, or `$16.79 / $20.00` when the starting amount is known.
++    var described: String {
++        let left = Self.money(remaining, currency: currency)
++        guard let limit, limit > 0 else { return left }
++        return "\(left) / \(Self.money(limit, currency: currency))"
++    }
++
++    private static func money(_ amount: Double, currency: String) -> String {
++        let formatter = NumberFormatter()
++        formatter.numberStyle = .currency
++        formatter.currencyCode = currency
++        formatter.minimumFractionDigits = 2
++        formatter.maximumFractionDigits = 2
++        return formatter.string(from: NSNumber(value: amount)) ?? "\(currency) \(amount)"
++    }
++}
++
++enum ProviderBalanceError: Error {
++    /// The configuration holds no address to ask.
++    case noEndpoint
++    /// The endpoint answered, with nothing this can read as a balance.
++    case unsupported
++}
++
++enum ProviderBalanceLookup {
++    /// Asks `baseURL`'s endpoint what `apiKey` has left.
++    ///
++    /// The host decides which shape to ask for first — DeepSeek and
++    /// OpenRouter answer on paths of their own — and everything else is
++    /// asked the OpenAI billing pair, which most relays forward. Each is
++    /// tried in turn and the first answer wins, so a relay that implements
++    /// one of them is reached whichever it is.
++    static func fetch(baseURL: String, apiKey: String) async throws -> ProviderBalance {
++        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
++        guard let root = root(of: trimmed) else { throw ProviderBalanceError.noEndpoint }
++        let host = (root.host ?? "").lowercased()
++
++        if host.contains("deepseek"), let balance = try? await deepSeek(root: root, key: apiKey) {
++            return balance
++        }
++        if host.contains("openrouter"), let balance = try? await openRouter(root: root, key: apiKey) {
++            return balance
++        }
++        if let balance = try? await openAIBilling(root: root, key: apiKey) {
++            return balance
++        }
++        throw ProviderBalanceError.unsupported
++    }
++
++    /// `https://gateway.example.com/v1` as the site's own origin: billing
++    /// lives beside the API, not under the versioned path the key talks to.
++    private static func root(of baseURL: String) -> URL? {
++        let candidate = baseURL.contains("://") ? baseURL : "https://" + baseURL
++        guard var components = URLComponents(string: candidate),
++              components.host?.isEmpty == false
++        else { return nil }
++        components.path = ""
++        components.query = nil
++        components.fragment = nil
++        return components.url
++    }
++
++    // MARK: - Routes
++
++    private static func openAIBilling(root: URL, key: String) async throws -> ProviderBalance {
++        guard let subscriptionURL = URL(string: "/v1/dashboard/billing/subscription", relativeTo: root) else {
++            throw ProviderBalanceError.noEndpoint
++        }
++        let subscription = try object(of: try await payload(at: subscriptionURL, key: key))
++        let limit = subscription["hard_limit_usd"] as? Double
++            ?? subscription["system_hard_limit_usd"] as? Double
++            ?? 0
++
++        let formatter = DateFormatter()
++        formatter.locale = Locale(identifier: "en_US_POSIX")
++        formatter.timeZone = TimeZone(identifier: "UTC")
++        formatter.dateFormat = "yyyy-MM-dd"
++        let now = Date()
++        let start = formatter.string(from: now.addingTimeInterval(-86_400 * 365))
++        let end = formatter.string(from: now.addingTimeInterval(86_400))
++
++        guard var components = URLComponents(
++            url: URL(string: "/v1/dashboard/billing/usage", relativeTo: root) ?? root,
++            resolvingAgainstBaseURL: false,
++        ) else { throw ProviderBalanceError.noEndpoint }
++        components.queryItems = [
++            URLQueryItem(name: "start_date", value: start),
++            URLQueryItem(name: "end_date", value: end),
++        ]
++        guard let usageURL = components.url else { throw ProviderBalanceError.noEndpoint }
++        let usage = try object(of: try await payload(at: usageURL, key: key))
++        // `total_usage` is in cents, the one place OpenAI's billing API is
++        // not in dollars.
++        let used = (usage["total_usage"] as? Double ?? 0) / 100
++
++        guard limit > 0 || used > 0 else { throw ProviderBalanceError.unsupported }
++        return ProviderBalance(remaining: max(0, limit - used), currency: "USD", limit: limit > 0 ? limit : nil)
++    }
++
++    private static func deepSeek(root: URL, key: String) async throws -> ProviderBalance {
++        guard let url = URL(string: "/user/balance", relativeTo: root) else {
++            throw ProviderBalanceError.noEndpoint
++        }
++        let body = try object(of: try await payload(at: url, key: key))
++        guard let infos = body["balance_infos"] as? [[String: Any]],
++              let first = infos.first,
++              let text = first["total_balance"] as? String,
++              let remaining = Double(text)
++        else { throw ProviderBalanceError.unsupported }
++        return ProviderBalance(
++            remaining: remaining,
++            currency: first["currency"] as? String ?? "CNY",
++            limit: nil,
++        )
++    }
++
++    private static func openRouter(root: URL, key: String) async throws -> ProviderBalance {
++        guard let url = URL(string: "/api/v1/credits", relativeTo: root) else {
++            throw ProviderBalanceError.noEndpoint
++        }
++        let body = try object(of: try await payload(at: url, key: key))
++        guard let credits = body["data"] as? [String: Any] else { throw ProviderBalanceError.unsupported }
++        let total = credits["total_credits"] as? Double ?? 0
++        let used = credits["total_usage"] as? Double ?? 0
++        guard total > 0 else { throw ProviderBalanceError.unsupported }
++        return ProviderBalance(remaining: max(0, total - used), currency: "USD", limit: total)
++    }
++
++    // MARK: - Transport
++
++    /// The bytes the endpoint answered with. Returned as `Data` rather than
++    /// parsed here: a `[String: Any]` is not `Sendable`, and handing one back
++    /// across the await would be a concurrency error under Swift 6.
++    private static func payload(at url: URL, key: String) async throws -> Data {
++        var request = URLRequest(url: url)
++        request.httpMethod = "GET"
++        request.timeoutInterval = 20
++        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
++        request.setValue("application/json", forHTTPHeaderField: "Accept")
++        let (data, response) = try await URLSession.shared.data(for: request)
++        guard let http = response as? HTTPURLResponse, (200 ..< 300).contains(http.statusCode) else {
++            throw ProviderBalanceError.unsupported
++        }
++        return data
++    }
++
++    private static func object(of data: Data) throws -> [String: Any] {
++        guard let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
++            throw ProviderBalanceError.unsupported
++        }
++        return body
++    }
++}
+diff --git a/Apelin/Interface/Settings/Accounts/ProviderKeyFormController.swift b/Apelin/Interface/Settings/Accounts/ProviderKeyFormController.swift
+index 837c2a9..77b8ea5 100644
+--- a/Apelin/Interface/Settings/Accounts/ProviderKeyFormController.swift
++++ b/Apelin/Interface/Settings/Accounts/ProviderKeyFormController.swift
+@@ -6,6 +6,9 @@ import UIKit
+ final class ProviderKeyFormController: TableController {
+     var onSubmit: (([AgentSignInField: String]) -> Void)?
+     var onSwitchMethod: ((AgentSignInMethod) -> Void)?
++    /// Called with what the Name row holds when the form is sent. A name is
++    /// not a sign-in field: it goes nowhere near the credential.
++    var onLabelChange: ((String) -> Void)?
+ 
+     @objc dynamic var isSubmitting = false {
+         didSet {
+@@ -18,14 +21,23 @@ final class ProviderKeyFormController: TableController {
+     private let keys: [SignInProgress.KeyField]
+     private let alternatives: [AgentSignInMethod]
+     private let initialValues: [String: String]
++    /// The name this endpoint was given before, shown in the Name row.
++    private let labelValue: String?
++    /// Whether the Name row belongs here at all: only an
++    /// OpenAI-compatible endpoint can be one of several with one name.
++    private let showsLabel: Bool
+     private var fields: [AgentSignInField: UITextField] = [:]
+     private var cells: [AgentSignInField: UITableViewCell] = [:]
++    private var labelField: UITextField?
++    private var labelCell: UITableViewCell?
+     private enum Row: Hashable {
++        case label
+         case field(AgentSignInField)
+         case method(AgentSignInMethod)
+     }
+ 
+     private enum Section: Hashable {
++        case label
+         case field(AgentSignInField)
+         case methods
+     }
+@@ -42,10 +54,18 @@ final class ProviderKeyFormController: TableController {
+         primaryAction: UIAction { [weak self] _ in self?.submit() },
+     )
+ 
+-    init(keys: [SignInProgress.KeyField], alternatives: [AgentSignInMethod], initialValues: [String: String] = [:]) {
++    init(
++        keys: [SignInProgress.KeyField],
++        alternatives: [AgentSignInMethod],
++        initialValues: [String: String] = [:],
++        label: String? = nil,
++        showsLabel: Bool = false,
++    ) {
+         self.keys = keys.filter { $0.field != .defaultModel }
+         self.alternatives = alternatives
+         self.initialValues = initialValues
++        labelValue = label
++        self.showsLabel = showsLabel
+         super.init(style: .insetGrouped)
+     }
+ 
+@@ -59,6 +79,27 @@ final class ProviderKeyFormController: TableController {
+         tableView.keyboardDismissMode = .interactive
+         tableView.rowHeight = UITableView.automaticDimension
+         tableView.estimatedRowHeight = 52
++        // Several OpenAI-compatible endpoints share one name, and this is
++        // where one is added. The name is kept out of `fields`: it is not a
++        // sign-in field and must not be sent to apelin-agent with the key.
++        if showsLabel {
++            let label = UITextField()
++            label.font = .preferredFont(forTextStyle: .body)
++            label.adjustsFontForContentSizeCategory = true
++            label.autocapitalizationType = .words
++            label.autocorrectionType = .no
++            label.spellCheckingType = .no
++            label.smartDashesType = .no
++            label.smartQuotesType = .no
++            label.clearButtonMode = .whileEditing
++            label.returnKeyType = .next
++            label.text = labelValue
++            label.accessibilityLabel = String(localized: "Name")
++            label.placeholder = String(localized: "\(String(localized: "Name")) (Optional)")
++            label.addAction(UIAction { [weak self] _ in self?.focusFirstField() }, for: .editingDidEndOnExit)
++            labelField = label
++            labelCell = cell(containing: label)
++        }
+         for (index, key) in keys.enumerated() {
+             let field = UITextField()
+             field.font = .preferredFont(forTextStyle: .body)
+@@ -86,12 +127,14 @@ final class ProviderKeyFormController: TableController {
+         submitItem.accessibilityLabel = String(localized: "Fetch Models")
+         updateSubmit()
+         dataSource.headerTitle = { section in
+-            if case let .field(field) = section {
+-                return field.title
++            switch section {
++            case .label: return String(localized: "Name")
++            case let .field(field): return field.title
++            case .methods: return nil
+             }
+-            return nil
+         }
+-        var sections: [(Section, [Row])] = keys.map { (.field($0.field), [.field($0.field)]) }
++        var sections: [(Section, [Row])] = showsLabel ? [(.label, [.label])] : []
++        sections += keys.map { (.field($0.field), [.field($0.field)]) }
+         if !alternatives.isEmpty {
+             sections.append((.methods, alternatives.map(Row.method)))
+         }
+@@ -100,11 +143,21 @@ final class ProviderKeyFormController: TableController {
+ 
+     override func viewDidAppear(_ animated: Bool) {
+         super.viewDidAppear(animated)
+-        if !isSubmitting, let first = keys.first {
+-            fields[first.field]?.becomeFirstResponder()
++        guard !isSubmitting else { return }
++        // The Name row comes first and is the only one here that is not a
++        // credential: fill that, then the key.
++        if let labelField, (labelField.text ?? "").isEmpty {
++            labelField.becomeFirstResponder()
++        } else {
++            focusFirstField()
+         }
+     }
+ 
++    private func focusFirstField() {
++        guard let first = keys.first else { return }
++        fields[first.field]?.becomeFirstResponder()
++    }
++
+     @objc private dynamic func cell(containing input: UIView) -> UITableViewCell {
+         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+         cell.selectionStyle = .none
+@@ -141,6 +194,8 @@ final class ProviderKeyFormController: TableController {
+     @objc private dynamic func updateSubmit() {
+         submitItem.isEnabled = isReady && !isSubmitting
+         fields.values.forEach { $0.isEnabled = !isSubmitting }
++        // a name is not required, so it cannot make the form ready or not
++        labelField?.isEnabled = !isSubmitting
+     }
+ 
+     @objc private dynamic func advance(from index: Int) {
+@@ -154,10 +209,16 @@ final class ProviderKeyFormController: TableController {
+     @objc private dynamic func submit() {
+         guard isReady, !isSubmitting else { return }
+         view.endEditing(true)
++        if showsLabel {
++            onLabelChange?(labelField?.text ?? "")
++        }
+         onSubmit?(values)
+     }
+ 
+     private func cell(for row: Row) -> UITableViewCell? {
++        if case .label = row {
++            return labelCell
++        }
+         if case let .field(field) = row {
+             return cells[field]
+         }
+@@ -175,6 +236,7 @@ final class ProviderKeyFormController: TableController {
+         tableView.deselectRow(at: indexPath, animated: true)
+         guard let row = dataSource.value(at: indexPath) else { return }
+         switch row {
++        case .label: labelField?.becomeFirstResponder()
+         case let .field(field): fields[field]?.becomeFirstResponder()
+         case let .method(method):
+             if !isSubmitting {
+diff --git a/Apelin/Interface/Settings/Accounts/ProviderLabel.swift b/Apelin/Interface/Settings/Accounts/ProviderLabel.swift
+new file mode 100644
+index 0000000..06c6c9e
+--- /dev/null
++++ b/Apelin/Interface/Settings/Accounts/ProviderLabel.swift
+@@ -0,0 +1,43 @@
++import ApelinProtocol
++import Foundation
++
++/// The name a person gave a model provider.
++///
++/// Every OpenAI-compatible endpoint shares one display name and one mark, and
++/// the list tells them apart by the host each was signed in to. Two relays
++/// behind one gateway, or a host that reads as an API address, come out
++/// looking the same anyway. A name is presentation only: it is not part of
++/// the credential, it never reaches apelin-agent or kwwk, and it is kept in
++/// this app's preferences under the provider's `rawValue` — which names one
++/// endpoint (`openAICompatible`, `openAICompatible.2`) exactly, and every
++/// other provider once.
++enum ProviderLabel {
++    private static let key = "provider.names"
++    /// Past this a name is a paragraph, and the list draws one line.
++    private static let limit = 40
++
++    private static var stored: [String: String] {
++        UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
++    }
++
++    /// The name given to `provider`, or nil when it has none.
++    static func name(of provider: AgentProvider) -> String? {
++        guard let name = stored[provider.rawValue]?.trimmingCharacters(in: .whitespacesAndNewlines),
++              !name.isEmpty
++        else { return nil }
++        return name
++    }
++
++    /// What to call `provider` on screen: the name it was given, or its own.
++    static func displayName(of provider: AgentProvider) -> String {
++        name(of: provider) ?? provider.displayName
++    }
++
++    /// Names `provider`; an empty name takes the name away again.
++    static func setName(_ name: String?, for provider: AgentProvider) {
++        var all = stored
++        let trimmed = (name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
++        all[provider.rawValue] = trimmed.isEmpty ? nil : String(trimmed.prefix(limit))
++        UserDefaults.standard.set(all, forKey: key)
++    }
++}
+diff --git a/Apelin/Interface/Settings/Accounts/ProviderLoginController.swift b/Apelin/Interface/Settings/Accounts/ProviderLoginController.swift
+index 5435039..6b7aa11 100644
+--- a/Apelin/Interface/Settings/Accounts/ProviderLoginController.swift
++++ b/Apelin/Interface/Settings/Accounts/ProviderLoginController.swift
+@@ -152,7 +152,7 @@ final class ProviderLoginController: UIViewController {
+         isEditingConfiguration = account.signedIn && account.isAPIKeyAccount
+         method = account.isAPIKeyAccount ? .apiKey : account.method
+         super.init(nibName: nil, bundle: nil)
+-        title = account.provider.displayName
++        title = ProviderLabel.displayName(of: account.provider)
+     }
+ 
+     @available(*, unavailable)
+@@ -405,7 +405,7 @@ final class ProviderLoginController: UIViewController {
+         scrollView.isHidden = false
+         iconView.image = provider.icon
+         iconView.tintColor = nil
+-        titleLabel.text = provider.displayName
++        titleLabel.text = ProviderLabel.displayName(of: provider)
+         subtitleLabel.text = provider.signInSummary
+         primaryButton.isHidden = false
+         body.isHidden = false
+@@ -430,9 +430,18 @@ final class ProviderLoginController: UIViewController {
+                 keys: keys,
+                 alternatives: methods.filter { $0 != method },
+                 initialValues: savedValues,
++                label: ProviderLabel.name(of: provider),
++                showsLabel: provider.kind == .openAICompatible,
+             )
+             form.onSubmit = { [weak self] values in self?.send(values) }
+             form.onSwitchMethod = { [weak self] method in self?.switchMethod(to: method) }
++            // Stored when the form is sent, so a name typed and then
++            // abandoned does not outlive the attempt.
++            form.onLabelChange = { [weak self] name in
++                guard let self else { return }
++                ProviderLabel.setName(name, for: self.provider)
++                self.title = ProviderLabel.displayName(of: self.provider)
++            }
+             addChild(form)
+             view.addSubview(form.view)
+             form.view.snp.makeConstraints {
+diff --git a/Apelin/Resources/Localizable.xcstrings b/Apelin/Resources/Localizable.xcstrings
+index 3a94bfc..c4f3a08 100644
+--- a/Apelin/Resources/Localizable.xcstrings
++++ b/Apelin/Resources/Localizable.xcstrings
+@@ -1,6 +1,158 @@
+ {
+   "sourceLanguage" : "en",
+   "strings" : {
++    "Balance" : {
++      "localizations" : {
++        "ar" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "الرصيد"
++          }
++        },
++        "de" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Guthaben"
++          }
++        },
++        "es" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Saldo"
++          }
++        },
++        "fr" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Solde"
++          }
++        },
++        "it" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Saldo"
++          }
++        },
++        "ja" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "残高"
++          }
++        },
++        "ko" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "잔액"
++          }
++        },
++        "pt-BR" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Saldo"
++          }
++        },
++        "ru" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Баланс"
++          }
++        },
++        "vi" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Số dư"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "余额"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "餘額"
++          }
++        }
++      }
++    },
++    "This endpoint does not report a balance." : {
++      "localizations" : {
++        "ar" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "لا يوفّر هذا الطرف أي معلومات عن الرصيد."
++          }
++        },
++        "de" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Dieser Endpunkt meldet kein Guthaben."
++          }
++        },
++        "es" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Este destino no informa de ningún saldo."
++          }
++        },
++        "fr" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Ce point de terminaison ne communique aucun solde."
++          }
++        },
++        "it" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Questo endpoint non riporta alcun saldo."
++          }
++        },
++        "ja" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "このエンドポイントは残高を返しません。"
++          }
++        },
++        "ko" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "이 엔드포인트는 잔액을 제공하지 않습니다."
++          }
++        },
++        "pt-BR" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Este endpoint não informa saldo."
++          }
++        },
++        "ru" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Эта точка входа не сообщает баланс."
++          }
++        },
++        "vi" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Điểm cuối này không báo cáo số dư."
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "该服务商未提供余额信息。"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "該服務商未提供餘額資訊。"
++          }
++        }
++      }
++    },
+     "Raccoon" : {
+       "localizations" : {
+         "ar" : {
+diff --git a/Configuration/Version.xcconfig b/Configuration/Version.xcconfig
+index 068eb46..d1c1c94 100644
+--- a/Configuration/Version.xcconfig
++++ b/Configuration/Version.xcconfig
+@@ -4,6 +4,11 @@
+ // A target-level MARKETING_VERSION / CURRENT_PROJECT_VERSION in
+ // project.pbxproj silently shadows these and ships the wrong build number —
+ // `make check` rejects that; keep it that way.
++//
++// A local build: upstream 0.4.9 does not exist. The number is above 0.4.7 on
++// purpose, so `dpkg -i` and Irisin take this package as an upgrade over the
++// release it was patched from instead of refusing a reinstall of the same
++// version. Change it back if this ever merges upstream.
+ 
+-MARKETING_VERSION = 0.4.7
+-CURRENT_PROJECT_VERSION = 40
++MARKETING_VERSION = 0.4.9
++CURRENT_PROJECT_VERSION = 42
+diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
+index fe2f6d7..b033221 100644
+--- a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
++++ b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
+@@ -691,6 +691,32 @@ public actor AgentSession {
+     }
+ 
+     private static func runCompaction(_ agent: Agent, sessionID: String) async -> AgentContextCompactionOutcome {
++        let first = await compactOnce(agent, sessionID: sessionID)
++        // A transcript whose tail is one enormous tool result cannot be
++        // summarised down to the recovery target: the planner keeps the last
++        // message whole whatever the budget, so a 200k-character file read
++        // pins the context above the target no matter how many attempts run.
++        // Collapsing the oversized tool results and asking once more costs a
++        // second summary instead of the conversation.
++        guard case let .failed(reason) = first, tooLargeToCompact(reason) else { return first }
++        let (shaken, elided) = AgentContextCompactor.shakeToolOutputs(agent.state.messages)
++        // Nothing oversized to collapse: the failure is something else
++        // wearing the same sentence, and a retry would only bill again.
++        guard elided > 0 else { return first }
++        agent.state.messages = shaken
++        return await compactOnce(agent, sessionID: sessionID)
++    }
++
++    /// kwwk's wording for a summary that came back too big — the reduction
++    /// target was missed, not the request. Matched on the sentence kwwk's
++    /// `insufficientReduction` renders, which the pinned revision makes
++    /// stable; a reworded kwwk would fall back to reporting the error.
++    private static func tooLargeToCompact(_ reason: String) -> Bool {
++        reason.contains("above the recovery target of")
++            || reason.contains("did not reduce the context")
++    }
++
++    private static func compactOnce(_ agent: Agent, sessionID: String) async -> AgentContextCompactionOutcome {
+         do {
+             return try await agent.withMaintenance { cancellation in
+                 await AgentContextCompactor.compactAgent(
+diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/NativeCompactionFallback.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/NativeCompactionFallback.swift
+index 052ab01..8e818b6 100644
+--- a/Packages/ApelinAgent/Sources/ApelinAgent/Session/NativeCompactionFallback.swift
++++ b/Packages/ApelinAgent/Sources/ApelinAgent/Session/NativeCompactionFallback.swift
+@@ -38,9 +38,38 @@ enum NativeCompactionFallback {
+     }
+ 
+     /// The compaction a session runs, on its own as the context fills and
+-    /// when the app asks: kwwk's defaults, with this in front of its native
+-    /// compaction.
++    /// when the app asks: this in front of kwwk's native compaction, and
++    /// kwwk's own numbers tightened.
++    ///
++    /// A chat that fills up fails with "compaction left <n> tokens, above the
++    /// recovery target of <m>". The target is
++    /// `window × threshold × recoveryRatio`, so on a 128k window with kwwk's
++    /// defaults it is 131072 × 0.75 × 0.8 = 78643 — and the summary a long
++    /// session produces lands well above that. kwwk retries by shrinking the
++    /// recent tail and giving up after `maxSummaryAttempts` (2), which is not
++    /// enough attempts to walk a large transcript down to the target:
++    ///
++    /// - `maxSummaryAttempts` 8, so the tail keeps halving instead of the
++    ///   third attempt never happening. `maxSummaryAttempts` is capped in
++    ///   effect by the tail reaching one message, so the extra attempts cost
++    ///   nothing once the plan stops moving.
++    /// - `recoveryRatio` 0.95, which lifts the target to 93388 on the same
++    ///   window — still under `AgentRequestBudget.inputTokens` (98304), so
++    ///   the summary that comes back is one the provider will accept.
++    /// - `keepRecentTokens` 6000, so the first attempt starts closer to the
++    ///   answer rather than spending an attempt on a 20000-token tail.
++    /// - `summaryWordTarget` 600, so each recap is shorter to begin with.
++    ///
++    /// None of these change what a summary is: they change how hard the
++    /// compactor tries and where it aims. The transcript still ends up with
++    /// a recap plus the recent tail, and a session that fits is untouched.
+     static var configuration: AgentContextCompactionConfig {
+-        AgentContextCompactionConfig(nativeCompaction: compact())
++        AgentContextCompactionConfig(
++            summaryWordTarget: 600,
++            keepRecentTokens: 6_000,
++            recoveryRatio: 0.95,
++            maxSummaryAttempts: 8,
++            nativeCompaction: compact(),
++        )
+     }
+ }
