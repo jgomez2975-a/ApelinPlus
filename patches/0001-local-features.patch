@@ -3054,7 +3054,7 @@ index 3a94bfc..6aa7e3a 100644
        "localizations" : {
          "ar" : {
 diff --git a/Configuration/Version.xcconfig b/Configuration/Version.xcconfig
-index 068eb46..5de3b6b 100644
+index 068eb46..a405e6b 100644
 --- a/Configuration/Version.xcconfig
 +++ b/Configuration/Version.xcconfig
 @@ -4,6 +4,11 @@
@@ -3069,30 +3069,100 @@ index 068eb46..5de3b6b 100644
  
 -MARKETING_VERSION = 0.4.7
 -CURRENT_PROJECT_VERSION = 40
-+MARKETING_VERSION = 0.5.0
-+CURRENT_PROJECT_VERSION = 43
++MARKETING_VERSION = 0.5.1
++CURRENT_PROJECT_VERSION = 44
 diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
-index fe2f6d7..b033221 100644
+index fe2f6d7..84b5ddc 100644
 --- a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
 +++ b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
-@@ -691,6 +691,32 @@ public actor AgentSession {
+@@ -637,6 +637,9 @@ public actor AgentSession {
+         aborted = false
+         let agent = agent
+         let opening = withProjectContext(prompt, repository: repository)
++        // Before the run is owned, so nothing is waiting on a transcript
++        // that is about to change under it.
++        foldToolOutputsPastTheInputBudget()
+         runTask = Task { [weak self] in
+             do {
+                 try await agent.prompt(opening, images: images)
+@@ -647,6 +650,45 @@ public actor AgentSession {
+         }
+     }
+ 
++    /// Collapses the tool output a request cannot carry, before the send that
++    /// would be refused for it.
++    ///
++    /// A turn that has read a few big files ends with "context is too large
++    /// and compaction failed: compaction left <n> tokens, above the recovery
++    /// target of <m>". Compaction cannot get that transcript under the target
++    /// by itself: kwwk's planner keeps the whole unanswered turn verbatim, so
++    /// the cut never moves and `maxSummaryAttempts` has nothing to retry —
++    /// every attempt plans the same replacement, and the last one is reported.
++    ///
++    /// The only part of a transcript that can shrink without a model call is
++    /// the tool output, so that is what goes, largest results first: 8000
++    /// characters leaves short reads alone, 2000 takes the medium ones, and
++    /// 1000 is kwwk's own `/shake`. Each step is measured, and the search
++    /// stops as soon as the transcript fits — a conversation that fits is
++    /// never touched, and one that only just overflows loses the least it can.
++    private func foldToolOutputsPastTheInputBudget() {
++        let window = agent.state.model.contextWindow
++        guard window >= 1_024 else { return }
++        // `AgentRequestBudget` (kwwk, internal) answers the same question:
++        // the window minus what generation may claim, a quarter of it on the
++        // routes that put no automatic limit on the wire. `currentUsage`
++        // counts messages only, so the system prompt and the tool
++        // declarations are subtracted here instead.
++        let inputBudget = window - window / 4 - 4_000
++        guard contextUsage.tokens > inputBudget else { return }
++        for limit in [8_000, 2_000, 1_000] {
++            let (shaken, elided) = AgentContextCompactor.shakeToolOutputs(
++                agent.state.messages,
++                keepingUnder: limit,
++            )
++            // No result is that large: a narrower limit catches more, not
++            // fewer, so the smaller steps still get their turn.
++            guard elided > 0 else { continue }
++            agent.state.messages = shaken
++            if contextUsage.tokens <= inputBudget { return }
++        }
++    }
++
+     /// Names the conversation, unless it has a title already: a title the
+     /// opener chose takes the place of a generated one.
+     public func setTitle(_ title: String) async {
+@@ -691,6 +733,46 @@ public actor AgentSession {
      }
  
      private static func runCompaction(_ agent: Agent, sessionID: String) async -> AgentContextCompactionOutcome {
 +        let first = await compactOnce(agent, sessionID: sessionID)
 +        // A transcript whose tail is one enormous tool result cannot be
-+        // summarised down to the recovery target: the planner keeps the last
-+        // message whole whatever the budget, so a 200k-character file read
-+        // pins the context above the target no matter how many attempts run.
-+        // Collapsing the oversized tool results and asking once more costs a
-+        // second summary instead of the conversation.
++        // summarised down to the recovery target: the planner keeps the whole
++        // unanswered turn whole whatever the budget, so a 200k-character file
++        // read pins the context above the target and no attempt moves the cut.
++        // Folding the tool output changes the transcript rather than the aim,
++        // which is the only retry that can change the plan. Least first: 8000
++        // characters leaves the short reads intact.
 +        guard case let .failed(reason) = first, tooLargeToCompact(reason) else { return first }
-+        let (shaken, elided) = AgentContextCompactor.shakeToolOutputs(agent.state.messages)
-+        // Nothing oversized to collapse: the failure is something else
-+        // wearing the same sentence, and a retry would only bill again.
-+        guard elided > 0 else { return first }
-+        agent.state.messages = shaken
-+        return await compactOnce(agent, sessionID: sessionID)
++        let untouched = agent.state.messages
++        for limit in [8_000, 2_000, 1_000] {
++            let (shaken, elided) = AgentContextCompactor.shakeToolOutputs(untouched, keepingUnder: limit)
++            // No result is that large; a narrower limit catches more.
++            guard elided > 0 else { continue }
++            agent.state.messages = shaken
++            let outcome = await compactOnce(agent, sessionID: sessionID)
++            if case let .failed(again) = outcome {
++                // The folding bought nothing yet. Put the transcript back so
++                // the next, harder pass starts from the original, and so a
++                // failure for some other reason leaves the tool output alone.
++                agent.state.messages = untouched
++                guard tooLargeToCompact(again) else { return .failed(again) }
++                continue
++            }
++            return outcome
++        }
++        agent.state.messages = untouched
++        return first
 +    }
 +
 +    /// kwwk's wording for a summary that came back too big — the reduction

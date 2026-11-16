@@ -17,7 +17,7 @@ fork 一份两千多个文件的仓库，上游一更新就得 rebase，而且�
 | patch | 做什么 | 风险 |
 |---|---|---|
 | `0000-lower-ios-sdk-tier` | `IOS_SDK_TIER 27.1 → 26.5`，让 `macos-26` 镜像（Xcode 26.6）能过 `sdk-tier` | 低。只有代码真用了 iOS 27 API 才会炸，`xcodebuild` 会直接报 |
-| `0001-local-features` | 四项功能 + 六屏界面：中转站标签与配色、上下文压缩修复、会话内搜索、余额查询与详情页、聊天页上下文条与检查器；版本 `0.4.7 (40) → 0.5.0 (43)` | 中。17 个文件、6 个新文件，见下 |
+| `0001-local-features` | 四项功能 + 六屏界面：中转站标签与配色、上下文压缩修复、会话内搜索、余额查询与详情页、聊天页上下文条与检查器；版本 `0.4.7 (40) → 0.5.1 (44)` | 中。17 个文件、6 个新文件，见下 |
 
 `0001` 曾是 `0001-endpoint-names`（标签）+ `0002-local-version`（版本号）两个补丁。四项功能里有三项改到了同一批文件（`ChatController`、`ModelProvidersController`），拆开生成时后一个补丁的上下文会依赖前一个已应用，合并成一个补丁反而更稳。
 
@@ -68,7 +68,52 @@ kwwk 压缩失败时会缩小"保留的近期尾部"重试，但 `maxSummaryAtte
 | `keepRecentTokens` | 20000 | 6000 | 第一轮就从更靠近答案的地方开始，不浪费一轮压 20k 尾部 |
 | `summaryWordTarget` | 900 | 600 | 每份摘要本身就短一点 |
 
-另加兜底：压缩失败且原因是"压不下去"时，先用 `AgentContextCompactor.shakeToolOutputs` 把超长 tool result 折成占位符（纯本地操作，不花 token），再压一次。针对的是"尾部卡着一条 200k 字符的文件读取，切分时整条保留，怎么压都超"这种情况。折叠后仍失败才把错误报出来。
+另加兜底：压缩失败且原因是"压不下去"时，先用 `AgentContextCompactor.shakeToolOutputs` 把超长 tool result 折成占位符（纯本地操作，不花 token），再压一次。
+
+#### 2b. 光调参数救不了，原因在 planner
+
+上面那四个参数是第一版的做法。它们能让"整体偏大、但切得动"的会话压下来，**救不了截图里那一条**，两个原因：
+
+**一、切点被钉死。** `CompactionPlanner.plan` 里：
+
+```swift
+if let protectedUserStart, suffixStart > protectedUserStart {
+    suffixStart = protectedUserStart      // 整个未回答的 turn 原地保留
+    suffixTokens = estimatedTokens(in: Array(messages[suffixStart...]))
+}
+```
+
+一个读了几个大文件的 turn，其全部 tool result 都排在 `protectedUserStart` 之后，于是整轮被无条件保留。`keepRecentTokens` 缩到多少，`plan.firstKeptMessageIndex` 都是同一个值，`ContextCompactionPipeline` 里这行
+
+```swift
+guard previousCut != plan.firstKeptMessageIndex else { break }
+```
+
+第一轮就退出 —— `maxSummaryAttempts` 配成 8 也是 8 次计划同一个替换，最后一次的 `tokensAfter` 被原样报出来（截图里的 120801）。
+
+**二、走的不是这条路。** 这条报错来自 `Agent.prompt` 内部的 preflight（`AgentContextPreflightError.compactionFailed`），不经过 `AgentSession.runCompaction`（那是手动压缩和空闲压缩的入口）。只在 `runCompaction` 里加兜底，对发送时被拒这种情形完全无效。
+
+能改的是 transcript 本身，而不用模型就能缩小的只有 tool output。所以补了两处：
+
+**发送前** —— `AgentSession.prompt` 里的 `foldToolOutputsPastTheInputBudget()`。只在 `currentUsage > window − window/4 − 4000` 时动手，也就是这条消息本来就会被拒；装得下的会话一个字节都不动。三档折叠，每档之后重新量，够了就停：
+
+| 档 | 折叠什么 |
+|---|---|
+| 8000 字符 | 只收真正的大块（整文件读取、长 diff） |
+| 2000 字符 | 连中等输出一起收 |
+| 1000 字符 | kwwk `/shake` 的默认值，等于把工具输出全部作废 |
+
+`window − window/4` 是 kwwk `AgentRequestBudget.inputTokens` 的算法（自定义模型没有 automatic limit 时按窗口 1/4 留输出余量）；再减 4000 是因为 `currentUsage(messages:)` 只数消息，不含系统提示和工具声明。
+
+**压缩兜底** —— `runCompaction` 同样的三档，每档后重压一次。失败就**回滚** transcript：不能既没压成，又把工具输出永久扔掉。非体积原因的失败（比如 `refusedTooFewMessages`）立即回滚返回。
+
+折叠后的 tool result 长这样，模型能看出这里被省略了、原来多大：
+
+```
+[tool result elided to reclaim context — was 214883 chars]
+```
+
+这是有代价的：被折掉的输出模型再也看不到，之后要靠重新读取。所以只在"这条消息本来就发不出去"时才动，且从最温和的一档试起。
 
 #### 3. 会话内搜索
 
@@ -148,6 +193,6 @@ git diff --cached > ../apelin-plus/patches/0001-local-features.patch
 
 `git archive v0.4.7` 导出一份干净树，`git init` 后 `git apply --check` 两个补丁，都 `OK`。再实际 apply 一遍，确认：
 
-- `Configuration/Version.xcconfig` 落到 `0.5.0` / `43`
+- `Configuration/Version.xcconfig` 落到 `0.5.1` / `44`
 - 六个新文件到位
 - `Localizable.xcstrings` 仍是合法 JSON，1029 个键，新增的 12 个键 12 种语言齐全
