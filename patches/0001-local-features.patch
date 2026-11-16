@@ -2526,7 +2526,7 @@ index 0000000..a7bd137
 +}
 diff --git a/Apelin/Interface/Settings/Accounts/ProviderBalanceScreen.swift b/Apelin/Interface/Settings/Accounts/ProviderBalanceScreen.swift
 new file mode 100644
-index 0000000..e82068b
+index 0000000..718014b
 --- /dev/null
 +++ b/Apelin/Interface/Settings/Accounts/ProviderBalanceScreen.swift
 @@ -0,0 +1,464 @@
@@ -2757,7 +2757,7 @@ index 0000000..e82068b
 +            chip.textColor = UIColor(red: 0.64, green: 0.35, blue: 0, alpha: 1)
 +            chip.backgroundColor = UIColor(red: 1, green: 0.58, blue: 0, alpha: 0.15)
 +        } else {
-+            chip.text = String(localized: "OK")
++            chip.text = String(localized: "Normal")
 +            chip.textColor = UIColor(red: 0.12, green: 0.48, blue: 0.22, alpha: 1)
 +            chip.backgroundColor = UIColor(red: 0.20, green: 0.78, blue: 0.35, alpha: 0.13)
 +        }
@@ -4086,7 +4086,7 @@ index 0000000..070d59a
 +    }
 +}
 diff --git a/Apelin/Resources/Localizable.xcstrings b/Apelin/Resources/Localizable.xcstrings
-index 3a94bfc..7f078d6 100644
+index 3a94bfc..c0c5315 100644
 --- a/Apelin/Resources/Localizable.xcstrings
 +++ b/Apelin/Resources/Localizable.xcstrings
 @@ -1,6 +1,6694 @@
@@ -7817,7 +7817,7 @@ index 3a94bfc..7f078d6 100644
 +        }
 +      }
 +    },
-+    "OK" : {
++    "Normal" : {
 +      "localizations" : {
 +        "ar" : {
 +          "stringUnit" : {
@@ -10785,7 +10785,7 @@ index 3a94bfc..7f078d6 100644
        "localizations" : {
          "ar" : {
 diff --git a/Configuration/Version.xcconfig b/Configuration/Version.xcconfig
-index 068eb46..a129ba6 100644
+index 068eb46..3c7b16f 100644
 --- a/Configuration/Version.xcconfig
 +++ b/Configuration/Version.xcconfig
 @@ -4,6 +4,11 @@
@@ -10801,7 +10801,7 @@ index 068eb46..a129ba6 100644
 -MARKETING_VERSION = 0.4.7
 -CURRENT_PROJECT_VERSION = 40
 +MARKETING_VERSION = 0.5.2
-+CURRENT_PROJECT_VERSION = 45
++CURRENT_PROJECT_VERSION = 46
 diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
 index fe2f6d7..cbb6523 100644
 --- a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
