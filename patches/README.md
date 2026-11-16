@@ -17,7 +17,7 @@ fork 一份两千多个文件的仓库，上游一更新就得 rebase，而且�
 | patch | 做什么 | 风险 |
 |---|---|---|
 | `0000-lower-ios-sdk-tier` | `IOS_SDK_TIER 27.1 → 26.5`，让 `macos-26` 镜像（Xcode 26.6）能过 `sdk-tier` | 低。只有代码真用了 iOS 27 API 才会炸，`xcodebuild` 会直接报 |
-| `0001-local-features` | 四项功能 + 六屏界面：中转站标签与配色、上下文压缩修复、会话内搜索、余额查询与详情页、聊天页上下文条与检查器；版本 `0.4.7 (40) → 0.5.1 (44)` | 中。17 个文件、6 个新文件，见下 |
+| `0001-local-features` | 四项功能 + 六屏界面：中转站标签与配色、上下文压缩修复、会话内搜索、余额查询与详情页、聊天页上下文条与检查器；版本 `0.4.7 (40) → 0.5.4 (49)` | 中。17 个文件、6 个新文件，见下 |
 
 `0001` 曾是 `0001-endpoint-names`（标签）+ `0002-local-version`（版本号）两个补丁。四项功能里有三项改到了同一批文件（`ChatController`、`ModelProvidersController`），拆开生成时后一个补丁的上下文会依赖前一个已应用，合并成一个补丁反而更稳。
 
@@ -216,6 +216,11 @@ git diff --cached > ../apelin-plus/patches/0001-local-features.patch
 
 `git archive v0.4.7` 导出一份干净树，`git init` 后 `git apply --check` 两个补丁，都 `OK`。再实际 apply 一遍，确认：
 
-- `Configuration/Version.xcconfig` 落到 `0.5.1` / `44`
+- `Configuration/Version.xcconfig` 落到 `0.5.4` / `49`
+
+#### 5c. 启动闪退与推理折叠（0.5.3 / 0.5.4）
+
+- **0.5.3**：聊天页上下文条的 `bottom` 约束挂在 `composerBackground` 上，却在 `replaceMessageList()` 里（composer 尚未入树）就被激活 → 无共同祖先 → `NSInvalidArgumentException`。App 启动恢复上次会话即建聊天页，所以点图标就闪。改为 `viewDidLoad` 末尾安装，并加 `guard contextBar.superview == nil, composerBackground.superview != nil`。
+- **0.5.4**：压缩失败时先丢弃已结束轮次的 thinking 块（`AssistantBlock.thinking`），再退回折叠 tool result。原因：报错 `compaction left 105979 tokens, above the recovery target of 93388` 的会话里，检查器显示占用最高的是三条 60–71k 的「正在思考」，而 `shakeToolOutputs` 只处理 `.toolResult`，折叠数为 0 就直接报错。thinking 是一次性产物、不承载事实，删除比折叠工具输出代价低；块整体删除而非改写文本，因为 thinking signature 覆盖原文，改写会被校验方拒绝。
 - 六个新文件到位
 - `Localizable.xcstrings` 仍是合法 JSON，1029 个键，新增的 12 个键 12 种语言齐全

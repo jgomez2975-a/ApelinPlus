@@ -10782,7 +10782,7 @@ index 3a94bfc..c0c5315 100644
        "localizations" : {
          "ar" : {
 diff --git a/Configuration/Version.xcconfig b/Configuration/Version.xcconfig
-index 068eb46..912ea1c 100644
+index 068eb46..86a665b 100644
 --- a/Configuration/Version.xcconfig
 +++ b/Configuration/Version.xcconfig
 @@ -4,6 +4,11 @@
@@ -10797,10 +10797,10 @@ index 068eb46..912ea1c 100644
  
 -MARKETING_VERSION = 0.4.7
 -CURRENT_PROJECT_VERSION = 40
-+MARKETING_VERSION = 0.5.3
-+CURRENT_PROJECT_VERSION = 48
++MARKETING_VERSION = 0.5.4
++CURRENT_PROJECT_VERSION = 49
 diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
-index fe2f6d7..cbb6523 100644
+index fe2f6d7..272ef5b 100644
 --- a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
 +++ b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
 @@ -637,6 +637,9 @@ public actor AgentSession {
@@ -10813,7 +10813,7 @@ index fe2f6d7..cbb6523 100644
          runTask = Task { [weak self] in
              do {
                  try await agent.prompt(opening, images: images)
-@@ -647,6 +650,48 @@ public actor AgentSession {
+@@ -647,6 +650,113 @@ public actor AgentSession {
          }
      }
  
@@ -10846,6 +10846,14 @@ index fe2f6d7..cbb6523 100644
 +        // the inspector may have turned this off: folding is the last resort
 +        // and it costs the tool output for good
 +        guard CompactionTuning.autoTrim else { return }
++        // Reasoning first, and it is free: a turn that has ended is never
++        // asked about again, so its thinking is only weight on every later
++        // request — while folding a tool result costs the model the file it
++        // read. The live turn keeps its own until that is not enough.
++        Self.elideReasoning(agent, keepingLatest: true)
++        if contextUsage.tokens <= inputBudget { return }
++        Self.elideReasoning(agent, keepingLatest: false)
++        if contextUsage.tokens <= inputBudget { return }
 +        for limit in CompactionTuning.retreatSteps {
 +            let (shaken, elided) = AgentContextCompactor.shakeToolOutputs(
 +                agent.state.messages,
@@ -10859,10 +10867,67 @@ index fe2f6d7..cbb6523 100644
 +        }
 +    }
 +
++    /// Drops the reasoning blocks a finished turn left behind.
++    ///
++    /// Thinking is written once and sent back with every later request, so a
++    /// turn that reasoned for a hundred thousand tokens goes on paying for it
++    /// long after it ended. Nothing reads it again, and it carries no fact the
++    /// conversation relies on, which makes it the cheapest thing a transcript
++    /// can give up when a send would otherwise be refused — the one big block
++    /// no tool-output fold can reach.
++    ///
++    /// `keepingLatest` leaves the last assistant message's reasoning alone: a
++    /// live turn may still be mid-thought, and providers that continue a
++    /// thinking stream want the block they were given. Blocks are dropped
++    /// whole rather than rewritten: a thinking signature covers the text it
++    /// was issued for, so a trimmed copy is refused by the endpoints that
++    /// check it.
++    @discardableResult
++    private static func elideReasoning(_ agent: Agent, keepingLatest: Bool) -> Int {
++        let messages = agent.state.messages
++        var lastAssistant: Int?
++        for (index, message) in messages.enumerated() {
++            if case .assistant = message { lastAssistant = index }
++        }
++        var elided = 0
++        var rewritten: [Message] = []
++        rewritten.reserveCapacity(messages.count)
++        for (index, message) in messages.enumerated() {
++            guard case .assistant(var assistant) = message else {
++                rewritten.append(message)
++                continue
++            }
++            if keepingLatest, index == lastAssistant {
++                rewritten.append(message)
++                continue
++            }
++            let kept = assistant.content.filter { block in
++                if case .thinking = block { return false }
++                return true
++            }
++            guard kept.count != assistant.content.count else {
++                rewritten.append(message)
++                continue
++            }
++            // A message that was only reasoning still has to say something:
++            // every wire format rejects an empty content array.
++            assistant.content = kept.isEmpty ? [.text(TextContent(text: reasoningPlaceholder))] : kept
++            elided += 1
++            rewritten.append(.assistant(assistant))
++        }
++        guard elided > 0 else { return 0 }
++        agent.state.messages = rewritten
++        return elided
++    }
++
++    /// Where a dropped reasoning block is stood in for. Sent to the model, so
++    /// it is English and never localised.
++    private static let reasoningPlaceholder = "[reasoning omitted to reclaim context]"
++
      /// Names the conversation, unless it has a title already: a title the
      /// opener chose takes the place of a generated one.
      public func setTitle(_ title: String) async {
-@@ -691,6 +736,47 @@ public actor AgentSession {
+@@ -691,6 +801,61 @@ public actor AgentSession {
      }
  
      private static func runCompaction(_ agent: Agent, sessionID: String) async -> AgentContextCompactionOutcome {
@@ -10876,24 +10941,38 @@ index fe2f6d7..cbb6523 100644
 +        // characters leaves the short reads intact.
 +        guard case let .failed(reason) = first, tooLargeToCompact(reason) else { return first }
 +        guard CompactionTuning.autoTrim else { return first }
-+        let untouched = agent.state.messages
++        // A protected turn is usually fat with reasoning rather than tool
++        // output — the inspector counts it under the message that carried it.
++        // Dropping it is the one change that can move the plan without a
++        // second summary, and it costs nothing the conversation needs.
++        var baseline = agent.state.messages
++        if elideReasoning(agent, keepingLatest: false) > 0 {
++            let outcome = await compactOnce(agent, sessionID: sessionID)
++            if case .failed = outcome {
++                // Keep the elision: it is free, and the next pass starts from
++                // the smaller transcript rather than undoing it.
++                baseline = agent.state.messages
++            } else {
++                return outcome
++            }
++        }
 +        for limit in CompactionTuning.retreatSteps {
-+            let (shaken, elided) = AgentContextCompactor.shakeToolOutputs(untouched, keepingUnder: limit)
++            let (shaken, elided) = AgentContextCompactor.shakeToolOutputs(baseline, keepingUnder: limit)
 +            // No result is that large; a narrower limit catches more.
 +            guard elided > 0 else { continue }
 +            agent.state.messages = shaken
 +            let outcome = await compactOnce(agent, sessionID: sessionID)
 +            if case let .failed(again) = outcome {
 +                // The folding bought nothing yet. Put the transcript back so
-+                // the next, harder pass starts from the original, and so a
++                // the next, harder pass starts from the same place, and so a
 +                // failure for some other reason leaves the tool output alone.
-+                agent.state.messages = untouched
++                agent.state.messages = baseline
 +                guard tooLargeToCompact(again) else { return .failed(again) }
 +                continue
 +            }
 +            return outcome
 +        }
-+        agent.state.messages = untouched
++        agent.state.messages = baseline
 +        return first
 +    }
 +
