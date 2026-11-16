@@ -41,11 +41,19 @@ env:
 jobs:
   deb:
     name: make deb (${{ inputs.flavor }})
-    # macOS 26: Apelin pins IOS_SDK_TIER 27.1, so it needs the SDK that
-    # ships with Xcode 27. If the image only carries Xcode 26, the
-    # `sdk-tier` target fails fast with exit 69 and names the SDK it sees —
-    # that error is the signal to switch this to `xcode-27`.
-    runs-on: macos-26
+    # `xcode-27`, not `macos-26`.
+    #
+    # Apelin pins IOS_SDK_TIER 27.1 in its Makefile, and `sdk-tier` exits 69
+    # when the selected Xcode is older. The macos-26 image tops out at Xcode
+    # 26.6 (iOS SDK 26.5) — that is the failure this job produced on its
+    # first run. The xcode-27 image carries 27.0, 27.1 (default) and 27.2,
+    # with iphoneos27.1 present, which is the exact SDK the project asks
+    # for.
+    #
+    # It is a public preview, so it can be slower to schedule and can
+    # disappear; if this label stops resolving, fall back to macos-26 plus
+    # an Xcode selection step and lower IOS_SDK_TIER in a patch.
+    runs-on: xcode-27
     timeout-minutes: 60
     steps:
       - name: Checkout builder (for patches)
@@ -53,9 +61,14 @@ jobs:
 
       - name: Toolchain
         run: |
+          set -euo pipefail
           xcodebuild -version
+          xcode-select -p
           echo "iPhoneOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
           sw_vers
+          # Everything the project's `check` target looks for, printed up
+          # front so a missing one is obvious before the build starts.
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
 
       - name: Clone upstream
         run: |
