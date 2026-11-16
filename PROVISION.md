@@ -142,28 +142,33 @@ https://github.com/<你>/ApelinPlus/actions
 | **CI** | 自动（push 就跑） | 验证 ApelinPlus 这个包能编译、测试能过 |
 | **Apelin .deb (upstream)** | **手动点** | clone 上游 Apelin 原版，在 macOS runner 上编出可安装的 .deb |
 
-第二个现在还是空的（`patches/` 里没东西），但它能回答一个你现在没法回答的问题：**这台云端机器能不能把 Apelin 编出来**。
+**这条路已经跑通了**，实测产出了 `wiki.qaq.apelin_0.3.7_iphoneos-arm64e.deb`，33.9 MB，`debian-binary + control.tar.zst + data.tar.zst` 结构完整。
 
-试一下：
+但它是**原版 Apelin**，不含任何新功能——`patches/` 里现在只有一个降 SDK 的补丁。它证明的是流水线可用，不是功能已生效。
+
+怎么跑：
 
 1. Actions → 左侧选 `Apelin .deb (upstream)` → 右边 `Run workflow`
-2. `flavor` 保持 `roothide`（除非你用的是 rootless 越狱）
-3. `ref` 保持 `main`
-4. 点绿色的 `Run workflow`
+2. `flavor`：`roothide`（roothide 越狱）或 `rootless`（无根越狱），**跟你设备对不上装了打不开**
+3. `runner`：保持 `macos-26`
+4. `ref`：保持 `main`
+5. 点绿色 `Run workflow`
 
-跑完 10–20 分钟，成功的话 job 页面底部有 **Artifacts** → `apelin-roothide-1.zip`，里面就是 .deb。
+约 20 分钟（排队时间另算，macOS runner 有时要等十几分钟）。成功后 job 页面底部 **Artifacts** → `apelin-roothide-N.zip`，解开就是 .deb。
 
-**这一步大概率会红。** 红在哪、为什么红，比红本身有用：
+### 踩过的三道坎，记在这里省下一次重走
 
-| 红在 | 说明 | 我怎么办 |
+| 现象 | 原因 | 现在怎么办 |
 |---|---|---|
-| `sdk-tier` / `exit 69` | runner 的 Xcode 不够新（Apelin 要求 iOS 27.1 SDK，即 Xcode 27） | 把 `runs-on` 改成 `xcode-27`，或者等镜像跟进 |
-| `ldid is required` | Homebrew 的 ldid 装不上 | 换从源码编，或者用 `ldid` 的 Procursus 源 |
-| `dpkg-deb is required` | 同上 | `brew install dpkg` 应该够，不行就改 workflow 里装 |
-| 编到一半 Swift 报错 | 上游 main 本身是坏的 | 换 `ref` 成上一个 tag 再试 |
-| 签名/打包阶段 | `Scripts/package-deb.sh` 依赖某个环境变量 | 看脚本，补到 workflow 的 env 里 |
+| `sdk-tier` 报 `the iPhoneOS SDK is 26.5; Apelin is linked against iOS 27.1` | `macos-26` 镜像最高 Xcode 26.6 / iOS SDK 26.5，上游 `IOS_SDK_TIER := 27.1` | 已用 `patches/0000-lower-ios-sdk-tier.patch` 把门槛降到 26.5 |
+| 构建跑到 `xcodebuild` 刚启动就 `The operation was canceled` | `xcode-27` 是 preview 镜像，runner 被回收。前置检查（51 项 checklist、5 个测试、全部 entitlements）都已经过了 | 默认改用 `macos-26`。想试 `xcode-27` 就在 `runner` 里选它 |
+| CI 或 deb 卡在 queued 十几分钟 | GitHub 的 macOS runner 池紧张，跟代码无关 | 等。别重复点，`cancel-in-progress` 已关掉，重复触发不会顶掉正在跑的 |
 
-把红色那段日志给我，我改 workflow。**这条路一旦通，你以后每次功能改动都能在手机上直接装来试，完全不需要 Mac。**
+### 一个还没验证的点
+
+这些 .deb **没有在真机上装过**。签名是 `ldid` ad-hoc 签的，roothide 布局的路径是对的，但「能不能装、装完能不能开」只有你的设备能回答。
+
+装坏了怎么回滚：`dpkg -r wiki.qaq.apelin`，或直接用 Filza 删掉包再 respring。装之前先 `dpkg -l | grep apelin` 记下当前版本。
 
 ---
 

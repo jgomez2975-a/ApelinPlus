@@ -19,9 +19,10 @@
 | `BalanceService.swift` | 探测顺序、缓存、按实例去重并发、代数计数器防"删掉的实例被请求复活" |
 | `BalanceCredentialStore.swift` | 中转站余额要的 session token + user id，单独进 keychain，不落 JSON |
 | `BalanceFormatting.swift` | 余额怎么读：`¥42.80`、`$3.12`、分档、详情页行 |
-| `Tests/` | 20 个用例：端点解析、五种响应格式、401 映射、分档边界、迁移幂等、损坏文件 |
+| `Sources/ApelinPlusUI/` | SwiftUI 层，独立 target：服务商列表（标签/配色/分组/搜索/余额胶囊）、实例编辑表单、余额详情页 |
+| `Tests/` | 25 个用例：端点解析、五种响应格式、401 映射、分档边界、迁移幂等、损坏文件 |
 
-**这个包不含 UI。** SwiftUI 那层要 `import ApelinPlus` 之后写，等这层绿了再做。
+UI 是独立 target，`ApelinPlus` 里没有一行 `import SwiftUI`——worker 和测试跑在没有窗口服务的环境里也不会被拖进来。
 
 ---
 
@@ -30,6 +31,8 @@
 | job | 干什么 | 红了说明什么 |
 |---|---|---|
 | `swift test (macOS 15 / Swift 6)` | `swift build --build-tests` + `swift test` | 逻辑或类型错误。这是唯一的门禁 |
+
+当前状态（2026-11-16 实测）：三个 job 全绿，25 个测试 0 失败，UI 层 1398 行在 iOS 与 macOS 两端都编译通过。
 | `compile for iOS device (arm64)` | 用 iphoneos SDK 编 arm64 slice | macOS 能过但 iOS 不能过 —— 通常是 `Security` 或 `Foundation` 的平台差异 |
 | `strict concurrency warnings` | 开 `-strict-concurrency=complete -warn-concurrency` 抓警告 | 不阻塞，只列出来。Swift 6 语言模式已经把大部分变成错误了，这个是补漏 |
 
