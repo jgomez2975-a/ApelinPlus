@@ -1,0 +1,83 @@
+name: CI
+
+# The package imports Security, so it only builds on Apple platforms. macOS
+# runners are the free tier's expensive ones (10x minutes); a run of this
+# package is about two minutes, so leave the concurrency group on to keep
+# a burst of pushes from queueing up six of them.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: swift test (macOS 15 / Swift 6)
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+          sw_vers
+
+      - name: Resolve
+        run: swift package resolve
+
+      - name: Build (library + tests)
+        run: swift build --build-tests
+
+      - name: Test
+        run: swift test
+
+  ios-slice:
+    name: compile for iOS device (arm64)
+    # Proves the same sources compile for the real target, not just for
+    # macOS: `Security` and `Foundation` differ enough between the two for
+    # this to be worth its own job.
+    #
+    # SwiftPM with an explicit iOS SDK rather than `xcodebuild -scheme`:
+    # a bare package has no committed scheme, and the scheme Xcode invents
+    # sometimes comes out named differently than the package. `--sdk` has
+    # no such moving part.
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build for iphoneos
+        run: |
+          set -euo pipefail
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          echo "SDK: $SDK"
+          swift build \
+            --sdk "$SDK" \
+            -Xswiftc -target -Xswiftc arm64-apple-ios16.0 \
+            --build-path .build-ios
+
+  # Swift 6 language mode is on through the tools version, but a warning
+  # is not an error by default. This job makes the strict-concurrency and
+  # deprecation warnings visible without blocking the two above.
+  warnings:
+    name: strict concurrency warnings
+    runs-on: macos-15
+    timeout-minutes: 25
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with complete concurrency checking
+        run: |
+          swift build --build-tests \
+            -Xswiftc -strict-concurrency=complete \
+            -Xswiftc -warn-concurrency 2>&1 | grep -E "warning:|error:" || true
+
+      - name: Summary
+        run: echo "Warnings above are informational; the test job is the gate."
