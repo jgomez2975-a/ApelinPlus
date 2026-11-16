@@ -1463,7 +1463,7 @@ index 0000000..6e29209
 +}
 diff --git a/Apelin/Interface/Settings/Accounts/ProviderBalanceScreen.swift b/Apelin/Interface/Settings/Accounts/ProviderBalanceScreen.swift
 new file mode 100644
-index 0000000..68b04e6
+index 0000000..71ed094
 --- /dev/null
 +++ b/Apelin/Interface/Settings/Accounts/ProviderBalanceScreen.swift
 @@ -0,0 +1,201 @@
@@ -1555,10 +1555,10 @@ index 0000000..68b04e6
 +
 +    private func rebuild() {
 +        var sections: [(Section, [Row])] = []
-+        if let balance {
++        if balance != nil {
 +            sections.append((.balance, [.amount, .detail]))
 +        }
-+        if let failure {
++        if failure != nil {
 +            sections.append((.message, [.message]))
 +        } else if loading, balance == nil {
 +            sections.append((.message, [.message]))
@@ -1669,7 +1669,7 @@ index 0000000..68b04e6
 +    }
 +}
 diff --git a/Apelin/Interface/Settings/Accounts/ProviderKeyFormController.swift b/Apelin/Interface/Settings/Accounts/ProviderKeyFormController.swift
-index 837c2a9..aea3b59 100644
+index 837c2a9..f1d2efa 100644
 --- a/Apelin/Interface/Settings/Accounts/ProviderKeyFormController.swift
 +++ b/Apelin/Interface/Settings/Accounts/ProviderKeyFormController.swift
 @@ -6,6 +6,13 @@ import UIKit
@@ -1872,7 +1872,7 @@ index 837c2a9..aea3b59 100644
 +
 +        let button = UIButton(type: .system)
 +        button.showsMenuAsPrimaryAction = true
-+        button.image = Self.swatch(ProviderTint.palette[tintIndex ?? 0])
++        button.setImage(Self.swatch(ProviderTint.palette[tintIndex ?? 0]), for: .normal)
 +        button.accessibilityLabel = String(localized: "Color")
 +        button.menu = tintMenu()
 +        tintButton = button
@@ -1901,7 +1901,7 @@ index 837c2a9..aea3b59 100644
 +
 +    private func select(tint index: Int?) {
 +        tintIndex = index
-+        tintButton?.image = Self.swatch(ProviderTint.palette[index ?? 0])
++        tintButton?.setImage(Self.swatch(ProviderTint.palette[index ?? 0]), for: .normal)
 +        tintButton?.menu = tintMenu()
 +        onTintChange?(index)
 +    }
