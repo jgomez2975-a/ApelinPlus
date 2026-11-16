@@ -10857,7 +10857,7 @@ index 3a94bfc..c0c5315 100644
        "localizations" : {
          "ar" : {
 diff --git a/Configuration/Version.xcconfig b/Configuration/Version.xcconfig
-index 068eb46..76c4a7e 100644
+index 068eb46..378f371 100644
 --- a/Configuration/Version.xcconfig
 +++ b/Configuration/Version.xcconfig
 @@ -4,6 +4,11 @@
@@ -10872,13 +10872,26 @@ index 068eb46..76c4a7e 100644
  
 -MARKETING_VERSION = 0.4.7
 -CURRENT_PROJECT_VERSION = 40
-+MARKETING_VERSION = 0.5.5
-+CURRENT_PROJECT_VERSION = 50
++MARKETING_VERSION = 0.5.6
++CURRENT_PROJECT_VERSION = 51
+diff --git a/Makefile b/Makefile
+index 001a65b..6ad5c72 100644
+--- a/Makefile
++++ b/Makefile
+@@ -138,7 +138,7 @@ IOS_DEPLOYMENT_FLOOR := $(shell sed -n 's/^[[:space:]]*IPHONEOS_DEPLOYMENT_TARGE
+ # refuse an older SDK, and `_package` reads the SDK back from the app it
+ # ships. Pick the Xcode with xcode-select or DEVELOPER_DIR (AGENTS.md ▸
+ # Decisions ▸ The SDK tier).
+-IOS_SDK_TIER        := 27.1
++IOS_SDK_TIER        := 26.5
+ 
+ # A device on the network or behind `iproxy $(DEVICE_PORT) 22`. Set
+ # DEVICE_PASSWORD empty to use an ssh key instead.
 diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
-index fe2f6d7..272ef5b 100644
+index fe2f6d7..c8b8b0d 100644
 --- a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
 +++ b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
-@@ -637,6 +637,9 @@ public actor AgentSession {
+@@ -637,16 +637,263 @@ public actor AgentSession {
          aborted = false
          let agent = agent
          let opening = withProjectContext(prompt, repository: repository)
@@ -10888,7 +10901,19 @@ index fe2f6d7..272ef5b 100644
          runTask = Task { [weak self] in
              do {
                  try await agent.prompt(opening, images: images)
-@@ -647,6 +650,113 @@ public actor AgentSession {
+             } catch {
+-                await self?.recordRunError(error)
++                let handled = await self?.recoverFromOversizedSend(
++                    error,
++                    agent: agent,
++                    opening: opening,
++                    images: images,
++                ) ?? false
++                if !handled {
++                    await self?.recordRunError(error)
++                }
+             }
+             await self?.runEnded()
          }
      }
  
@@ -10911,24 +10936,19 @@ index fe2f6d7..272ef5b 100644
 +    private func foldToolOutputsPastTheInputBudget() {
 +        let window = agent.state.model.contextWindow
 +        guard window >= 1_024 else { return }
-+        // `AgentRequestBudget` (kwwk, internal) answers the same question:
-+        // the window minus what generation may claim, a quarter of it on the
-+        // routes that put no automatic limit on the wire. `currentUsage`
-+        // counts messages only, so the system prompt and the tool
-+        // declarations are subtracted here instead.
-+        let inputBudget = window - window / 4 - 4_000
-+        guard contextUsage.tokens > inputBudget else { return }
 +        // the inspector may have turned this off: folding is the last resort
 +        // and it costs the tool output for good
 +        guard CompactionTuning.autoTrim else { return }
++        let ceiling = Self.sendCeiling(for: agent)
++        guard contextUsage.tokens > ceiling else { return }
 +        // Reasoning first, and it is free: a turn that has ended is never
 +        // asked about again, so its thinking is only weight on every later
 +        // request — while folding a tool result costs the model the file it
 +        // read. The live turn keeps its own until that is not enough.
 +        Self.elideReasoning(agent, keepingLatest: true)
-+        if contextUsage.tokens <= inputBudget { return }
++        if contextUsage.tokens <= ceiling { return }
 +        Self.elideReasoning(agent, keepingLatest: false)
-+        if contextUsage.tokens <= inputBudget { return }
++        if contextUsage.tokens <= ceiling { return }
 +        for limit in CompactionTuning.retreatSteps {
 +            let (shaken, elided) = AgentContextCompactor.shakeToolOutputs(
 +                agent.state.messages,
@@ -10938,8 +10958,142 @@ index fe2f6d7..272ef5b 100644
 +            // fewer, so the smaller steps still get their turn.
 +            guard elided > 0 else { continue }
 +            agent.state.messages = shaken
-+            if contextUsage.tokens <= inputBudget { return }
++            if contextUsage.tokens <= ceiling { return }
 +        }
++    }
++
++    /// How much a transcript may weigh before the send it belongs to risks
++    /// being refused.
++    ///
++    /// Two measures disagree here. kwwk decides on the whole context — the
++    /// messages plus the system prompt and the tool declarations — while
++    /// `contextUsage` counts the messages alone, so a transcript trimmed to
++    /// the documented target can still be refused for the header it does not
++    /// count. The ceiling is therefore taken well under the trigger rather
++    /// than at it: a fifth of it is the header's room, and trimming a little
++    /// early costs a thinking block where trimming late costs the turn.
++    private static func sendCeiling(for agent: Agent) -> Int {
++        let window = agent.state.model.contextWindow
++        // `AgentRequestBudget.inputTokens` on the routes that cap nothing
++        let budget = max(1, window - window / 4)
++        let trigger: Int
++        if let threshold = agent.autoCompact?.threshold {
++            let ratio = min(0.95, max(0.05, threshold))
++            trigger = max(1, Int(Double(window) * ratio))
++        } else {
++            trigger = budget
++        }
++        let refusal = min(budget, trigger)
++        return max(1, refusal - refusal / 5)
++    }
++
++    /// Sends once more after the transcript itself was the reason the first
++    /// attempt was refused.
++    ///
++    /// kwwk's preflight compacts before it refuses, and a transcript whose
++    /// unanswered tail is enormous cannot be compacted: the planner pins the
++    /// cut at the first message of that tail, every attempt plans the same
++    /// replacement, and the last one is reported as "compaction left <n>
++    /// tokens, above the recovery target of <m>" — which is a statement that
++    /// nothing shrank, not that the summary was too big.
++    ///
++    /// Folding tool output and reasoning before the send is the cheap answer
++    /// and it is tried first. This is what is left when that is not enough:
++    /// the transcript loses its middle, and the same prompt goes out once
++    /// more. A conversation missing its older half is worth more than a turn
++    /// that never leaves.
++    ///
++    /// Returns whether the failure was handled here — the retry either
++    /// answered or recorded its own error.
++    private func recoverFromOversizedSend(
++        _ error: Error,
++        agent: Agent,
++        opening: String,
++        images: [ImageContent],
++    ) async -> Bool {
++        let reason = error.localizedDescription
++        guard Self.tooLargeToCompact(reason) || reason.localizedCaseInsensitiveContains("context is too large") else {
++            return false
++        }
++        guard !aborted else { return false }
++        guard Self.shrinkToFit(agent, ceiling: Self.sendCeiling(for: agent)) else {
++            return false
++        }
++        do {
++            try await agent.prompt(opening, images: images)
++        } catch {
++            // The second error is the one worth showing: the first says only
++            // what trimming could not fix.
++            await recordRunError(error)
++        }
++        return true
++    }
++
++    /// Takes a transcript down to the ceiling by any means that costs no
++    /// model call, hardest last.
++    ///
++    /// The preflight refuses before it owns the transcript, so nothing here
++    /// races a run: the messages are the same ones the refused send measured.
++    ///
++    /// `droppingTurns` is off for a compaction asked for on purpose: losing
++    /// the middle of a conversation is the price of a turn that cannot be
++    /// sent, not of an optimisation the person chose to run.
++    @discardableResult
++    private static func shrinkToFit(
++        _ agent: Agent,
++        ceiling: Int,
++        droppingTurns: Bool = true,
++    ) -> Bool {
++        var changed = false
++        if elideReasoning(agent, keepingLatest: false) > 0 { changed = true }
++        guard messageTokens(agent) > ceiling else { return changed }
++        // kwwk's own `/shake` folds at 1000; 400 and 160 are past it, for a
++        // transcript whose bulk is one enormous result.
++        for limit in [1_000, 400, 160] {
++            let (shaken, elided) = AgentContextCompactor.shakeToolOutputs(
++                agent.state.messages,
++                keepingUnder: limit,
++            )
++            guard elided > 0 else { continue }
++            agent.state.messages = shaken
++            changed = true
++            if messageTokens(agent) <= ceiling { return true }
++        }
++        guard droppingTurns else { return changed }
++        // The last thing that can go without a model call.
++        while messageTokens(agent) > ceiling, dropOldestTurns(agent, keepingRecent: 6) {
++            changed = true
++        }
++        return changed
++    }
++
++    /// Drops the oldest turns, keeping the first one — the recap, after a
++    /// compaction — and the most recent ones.
++    ///
++    /// A turn is a user message and everything the model answered to it.
++    /// The cut lands on those boundaries because a tool call separated from
++    /// its result is refused by every wire format, which would trade a
++    /// too-large context for an impossible one.
++    private static func dropOldestTurns(_ agent: Agent, keepingRecent turns: Int) -> Bool {
++        let messages = agent.state.messages
++        var starts: [Int] = []
++        for (index, message) in messages.enumerated() {
++            if case .user = message { starts.append(index) }
++        }
++        guard starts.count > 2 else { return false }
++        let cut = starts[max(2, starts.count - turns)]
++        guard cut > starts[1] else { return false }
++        let kept = Array(messages[..<starts[1]]) + Array(messages[cut...])
++        guard kept.count < messages.count else { return false }
++        agent.state.messages = kept
++        return true
++    }
++
++    private static func messageTokens(_ agent: Agent) -> Int {
++        AgentContextCompactor.currentUsage(
++            messages: agent.state.messages,
++            model: agent.state.model,
++        ).tokens
 +    }
 +
 +    /// Drops the reasoning blocks a finished turn left behind.
@@ -11002,10 +11156,20 @@ index fe2f6d7..272ef5b 100644
      /// Names the conversation, unless it has a title already: a title the
      /// opener chose takes the place of a generated one.
      public func setTitle(_ title: String) async {
-@@ -691,6 +801,61 @@ public actor AgentSession {
+@@ -691,6 +938,71 @@ public actor AgentSession {
      }
  
      private static func runCompaction(_ agent: Agent, sessionID: String) async -> AgentContextCompactionOutcome {
++        // Space that costs nothing goes first. A summary is judged by how far
++        // the transcript came down, so a transcript that is already under the
++        // ceiling gives the summary nothing to prove — where one that starts
++        // above the recovery target cannot succeed at all, however good the
++        // summary is. Reasoning and oversized results are the only parts that
++        // can go without a model call, and the turns stay where they are:
++        // a compaction someone asked for is not the place to drop history.
++        if CompactionTuning.autoTrim {
++            shrinkToFit(agent, ceiling: sendCeiling(for: agent), droppingTurns: false)
++        }
 +        let first = await compactOnce(agent, sessionID: sessionID)
 +        // A transcript whose tail is one enormous tool result cannot be
 +        // summarised down to the recovery target: the planner keeps the whole

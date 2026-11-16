@@ -216,7 +216,7 @@ git diff --cached > ../apelin-plus/patches/0001-local-features.patch
 
 `git archive v0.4.7` 导出一份干净树，`git init` 后 `git apply --check` 两个补丁，都 `OK`。再实际 apply 一遍，确认：
 
-- `Configuration/Version.xcconfig` 落到 `0.5.5` / `50`
+- `Configuration/Version.xcconfig` 落到 `0.5.6` / `51`
 
 #### 5d. 余额识别（0.5.5）
 
@@ -231,3 +231,18 @@ git diff --cached > ../apelin-plus/patches/0001-local-features.patch
 - **0.5.4**：压缩失败时先丢弃已结束轮次的 thinking 块（`AssistantBlock.thinking`），再退回折叠 tool result。原因：报错 `compaction left 105979 tokens, above the recovery target of 93388` 的会话里，检查器显示占用最高的是三条 60–71k 的「正在思考」，而 `shakeToolOutputs` 只处理 `.toolResult`，折叠数为 0 就直接报错。thinking 是一次性产物、不承载事实，删除比折叠工具输出代价低；块整体删除而非改写文本，因为 thinking signature 覆盖原文，改写会被校验方拒绝。
 - 六个新文件到位
 - `Localizable.xcstrings` 仍是合法 JSON，1029 个键，新增的 12 个键 12 种语言齐全
+
+#### 5e. 压缩失败：阈值算错了（0.5.6）
+
+0.5.4 的推理折叠上线后仍然报 `compaction left 116815 tokens, above the recovery target of 93388`，数字一点没动。不是折叠无效，是**折叠压根没触发**。
+
+`foldToolOutputsPastTheInputBudget()` 原来的门槛是 `window − window/4 − 4000`。128k 窗口下是 94304，而 kwwk 的拒绝线是 `window × threshold = 131072 × 0.75 = 98304`（含 system prompt 与工具声明），恢复目标 `98304 × 0.95 = 93388`。116815 这个数在 kwwk 眼里早就超标，在我们的门槛下面，于是裁剪静默跳过，preflight 照常抛错。
+
+四处改动：
+
+1. **门槛对齐 kwwk**：`sendCeiling(for:)` 复刻 `window × threshold`（读 `agent.autoCompact?.threshold`，默认 0.75），并再让出 1/5 给 system prompt 与工具声明——`contextUsage` 只数消息，kwwk 数的是整个 context，两者差的就是这块。128k 窗口下门槛落到 78643。
+2. **发送被拒就重发一次**：`recoverFromOversizedSend` 接住 `AgentContextPreflightError`，把推理块全删、工具输出折到 1000/400/160，仍不够就按轮次删除中间的旧轮，然后重发同一条 prompt。`runOwnedLifecycle` 在抛错时已 `finishRun()`，重入是安全的。
+3. **压缩前先腾免费的**：`runCompaction` 开头先跑 `shrinkToFit(droppingTurns: false)`。摘要的失败判据是"压完还剩多少"，输入本身就在目标之上时无论摘要多好都过不去；先把推理和巨型工具输出扔掉，`insufficientReduction` 就不再出现。这一条不动历史。
+4. **删轮次以 turn 为界**：`dropOldestTurns` 只在 user 消息处切，保住第一条（压缩后的 recap）和最近 6 轮。tool call 与其 result 被切开会被所有 wire format 拒绝——用"太大"换"非法"没有意义。
+
+版本 `0.5.6` / `51`。
