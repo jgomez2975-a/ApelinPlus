@@ -1,6 +1,6 @@
 diff --git a/Apelin/Interface/Chats/ChatContextController.swift b/Apelin/Interface/Chats/ChatContextController.swift
 new file mode 100644
-index 0000000..dd5f517
+index 0000000..43657e8
 --- /dev/null
 +++ b/Apelin/Interface/Chats/ChatContextController.swift
 @@ -0,0 +1,412 @@
@@ -311,7 +311,7 @@ index 0000000..dd5f517
 +        cell.contentConfiguration = content
 +
 +        let amount = UILabel()
-+        amount.font = .monospacedDigitSystemFont(ofSize: 12)
++        amount.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
 +        amount.textColor = .tertiaryLabel
 +        amount.text = Self.exact(entry.tokens)
 +        amount.sizeToFit()
@@ -333,7 +333,7 @@ index 0000000..dd5f517
 +        let toggle = UISwitch()
 +        toggle.isOn = CompactionTuning.autoTrim
 +        toggle.addAction(UIAction { _ in
-+            UserDefaults.standard.set(toggle.isOn, forKey: CompactionTuning.autoTrimKey)
++            CompactionTuning.setAutoTrim(toggle.isOn)
 +        }, for: .valueChanged)
 +        cell.accessoryView = toggle
 +        return cell
@@ -387,7 +387,7 @@ index 0000000..dd5f517
 +        )
 +        for characters in [2_000, 4_000, 8_000, 16_000, 32_000] {
 +            sheet.addAction(UIAlertAction(title: Self.limitTitle(characters), style: .default) { _ in
-+                UserDefaults.standard.set(characters, forKey: CompactionTuning.toolOutputLimitKey)
++                CompactionTuning.setToolOutputLimit(characters)
 +                self.rebuild()
 +            })
 +        }
@@ -418,10 +418,10 @@ index 0000000..dd5f517
 +}
 diff --git a/Apelin/Interface/Chats/ChatContextUsage.swift b/Apelin/Interface/Chats/ChatContextUsage.swift
 new file mode 100644
-index 0000000..c540bc6
+index 0000000..fa752b4
 --- /dev/null
 +++ b/Apelin/Interface/Chats/ChatContextUsage.swift
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,153 @@
 +import ApelinProtocol
 +import Foundation
 +
@@ -478,8 +478,9 @@ index 0000000..c540bc6
 +        "\(percentText) · \(Self.abbreviated(tokens))"
 +    }
 +
-+    /// Everything that is not a message.
-+    var overhead: Double {
++    /// Everything that is not a message: the same for every conversation,
++    /// so it is a constant of the type rather than of one measurement.
++    static var overhead: Double {
 +        Self.systemPromptEstimate + Self.toolCatalogEstimate + Self.memoryEstimate
 +    }
 +
@@ -494,7 +495,7 @@ index 0000000..c540bc6
 +        }
 +        // the fixed part is what a request carries before the first word of
 +        // the conversation, so a total that leaves it out reads low by a page
-+        return ChatContextUsage(tokens: total + ChatContextUsage.overhead, byRole: byRole)
++        return ChatContextUsage(tokens: total + Self.overhead, byRole: byRole)
 +    }
 +
 +    /// One row, and whatever its trace holds: a summary's tool calls are
@@ -575,7 +576,7 @@ index 0000000..c540bc6
 +    }
 +}
 diff --git a/Apelin/Interface/Chats/ChatController.swift b/Apelin/Interface/Chats/ChatController.swift
-index ea62ed9..57dee8a 100644
+index ea62ed9..2d730e1 100644
 --- a/Apelin/Interface/Chats/ChatController.swift
 +++ b/Apelin/Interface/Chats/ChatController.swift
 @@ -31,6 +31,9 @@ final class ChatController: UIViewController {
@@ -663,7 +664,7 @@ index ea62ed9..57dee8a 100644
 +            // a manual compaction runs the same retreat: kwwk's planner still
 +            // pins the cut, and the session folds the tool output before it
 +            // gives up
-+            Task { _ = try? await runtime.compact(chat.id) }
++            Task { _ = try? await self.runtime.compact(chat.id) }
 +        }
 +        presentPageAsFormSheet(page)
 +    }
@@ -723,11 +724,12 @@ index ea62ed9..57dee8a 100644
                                 return UIAction(title: model, state: checked ? .on : .off) { _ in
 diff --git a/Apelin/Interface/Chats/ChatSearchController.swift b/Apelin/Interface/Chats/ChatSearchController.swift
 new file mode 100644
-index 0000000..b7d5a6c
+index 0000000..93e34d6
 --- /dev/null
 +++ b/Apelin/Interface/Chats/ChatSearchController.swift
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,481 @@
 +import SnapKit
++import Then
 +import UIKit
 +
 +/// Looks through the conversation that is open for a line of text.
@@ -757,6 +759,7 @@ index 0000000..b7d5a6c
 +    private let count = UILabel()
 +    private let chips = UIStackView()
 +    private let emptyLabel = UILabel()
++    private var chipsHeader: UIView?
 +    private var previousItem: UIBarButtonItem?
 +    private var nextItem: UIBarButtonItem?
 +
@@ -800,6 +803,17 @@ index 0000000..b7d5a6c
 +        updateMatches(keepingCurrent: false)
 +    }
 +
++    /// A table header is laid out by frame: width 0 at `viewDidLoad` would
++    /// squeeze the chips to nothing, so it follows the table once it has one.
++    override func viewDidLayoutSubviews() {
++        super.viewDidLayoutSubviews()
++        guard let header = chipsHeader, table.bounds.width > 0 else { return }
++        if abs(header.frame.width - table.bounds.width) > 0.5 {
++            header.frame.size.width = table.bounds.width
++            table.tableHeaderView = header
++        }
++    }
++
 +    override func viewDidAppear(_ animated: Bool) {
 +        super.viewDidAppear(animated)
 +        // The page exists to take a query; a reader who opened it and has to
@@ -833,7 +847,7 @@ index 0000000..b7d5a6c
 +        }, for: .editingChanged)
 +        field.addAction(UIAction { [weak self] _ in self?.advance(by: 1) }, for: .editingDidEndOnExit)
 +
-+        count.font = .monospacedDigitSystemFont(ofSize: 13)
++        count.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
 +        count.textColor = .secondaryLabel
 +        count.setContentHuggingPriority(.required, for: .horizontal)
 +
@@ -901,7 +915,7 @@ index 0000000..b7d5a6c
 +        chips.translatesAutoresizingMaskIntoConstraints = false
 +        // a table header is laid out by frame, so it is given one: the chips
 +        // inside it still use constraints against its edges
-+        let header = UIView(frame: CGRect(x: 0, y: 0, width: view.bounds.width, height: 46))
++        let header = UIView(frame: CGRect(x: 0, y: 0, width: view.bounds.width > 0 ? view.bounds.width : 360, height: 46))
 +        header.addSubview(chips)
 +        NSLayoutConstraint.activate([
 +            chips.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 16),
@@ -910,6 +924,7 @@ index 0000000..b7d5a6c
 +            chips.bottomAnchor.constraint(equalTo: header.bottomAnchor, constant: -4),
 +        ])
 +        table.tableHeaderView = header
++        self.chipsHeader = header
 +        rebuildChips()
 +    }
 +
@@ -1085,9 +1100,8 @@ index 0000000..b7d5a6c
 +
 +    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
 +        tableView.deselectRow(at: indexPath, animated: true)
-+        let match = matches[indexPath.row]
 +        guard matches.indices.contains(indexPath.row) else { return }
-+        onOpen?(match.message.id)
++        onOpen?(matches[indexPath.row].message.id)
 +        dismiss(animated: true)
 +    }
 +
@@ -2526,7 +2540,7 @@ index 0000000..a7bd137
 +}
 diff --git a/Apelin/Interface/Settings/Accounts/ProviderBalanceScreen.swift b/Apelin/Interface/Settings/Accounts/ProviderBalanceScreen.swift
 new file mode 100644
-index 0000000..718014b
+index 0000000..7e62b7e
 --- /dev/null
 +++ b/Apelin/Interface/Settings/Accounts/ProviderBalanceScreen.swift
 @@ -0,0 +1,464 @@
@@ -2978,14 +2992,14 @@ index 0000000..718014b
 +            // a day nothing was recorded keeps a stub, so the week still
 +            // reads as seven days rather than as four
 +            let fraction = value.map { max(0.08, ($0 - floor) / span) } ?? 0.04
-+            let height = bar.heightAnchor.constraint(equalTo: stack.heightAnchor, multiplier: fraction)
-+            height.priority = .required
-+            height.isActive = true
 +            if value == peak, value != nil {
 +                bar.backgroundColor = .label
 +            }
 +            bars.append(bar)
++            // into the stack first: a constraint between two views with no
++            // common ancestor throws when it is activated
 +            stack.addArrangedSubview(bar)
++            bar.heightAnchor.constraint(equalTo: stack.heightAnchor, multiplier: fraction).isActive = true
 +        }
 +    }
 +
@@ -10785,7 +10799,7 @@ index 3a94bfc..c0c5315 100644
        "localizations" : {
          "ar" : {
 diff --git a/Configuration/Version.xcconfig b/Configuration/Version.xcconfig
-index 068eb46..3c7b16f 100644
+index 068eb46..6b6a9bc 100644
 --- a/Configuration/Version.xcconfig
 +++ b/Configuration/Version.xcconfig
 @@ -4,6 +4,11 @@
@@ -10801,7 +10815,7 @@ index 068eb46..3c7b16f 100644
 -MARKETING_VERSION = 0.4.7
 -CURRENT_PROJECT_VERSION = 40
 +MARKETING_VERSION = 0.5.2
-+CURRENT_PROJECT_VERSION = 46
++CURRENT_PROJECT_VERSION = 47
 diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
 index fe2f6d7..cbb6523 100644
 --- a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
@@ -10913,49 +10927,6 @@ index fe2f6d7..cbb6523 100644
          do {
              return try await agent.withMaintenance { cancellation in
                  await AgentContextCompactor.compactAgent(
-diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/CompactionTuning.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/CompactionTuning.swift
-new file mode 100644
-index 0000000..630c601
---- /dev/null
-+++ b/Packages/ApelinAgent/Sources/ApelinAgent/Session/CompactionTuning.swift
-@@ -0,0 +1,37 @@
-+import Foundation
-+
-+/// The two numbers a person may want to move, and where they are kept.
-+///
-+/// Both are read by the session when it decides how hard to shrink a
-+/// transcript, and written by the inspector that shows them. They live in
-+/// `UserDefaults` rather than in a configuration object because the session
-+/// and the screen that changes them are in different modules and neither
-+/// should have to own the other to agree on a number.
-+public enum CompactionTuning {
-+    /// Whether a send that would be refused may fold its tool output to fit.
-+    public static let autoTrimKey = "compaction.autoTrim"
-+
-+    /// The character ceiling a tool result is folded at, the first time.
-+    public static let toolOutputLimitKey = "compaction.toolOutputLimit"
-+
-+    /// On by default: a conversation that cannot be sent is worse than one
-+    /// that has lost the middle of a build log.
-+    public static var autoTrim: Bool {
-+        UserDefaults.standard.object(forKey: autoTrimKey) as? Bool ?? true
-+    }
-+
-+    /// 8000 is the design's first step — large enough to leave a short file
-+    /// read alone, small enough to drop a whole build log.
-+    public static var toolOutputLimit: Int {
-+        let stored = UserDefaults.standard.integer(forKey: toolOutputLimitKey)
-+        return stored > 0 ? stored : 8_000
-+    }
-+
-+    /// The steps a failing compaction walks down, widest first, never above
-+    /// what was asked for: 1000 is kwwk's own `/shake`, and going below it
-+    /// only throws away the last of the output for no gain.
-+    public static var retreatSteps: [Int] {
-+        let preferred = toolOutputLimit
-+        return [preferred, min(2_000, preferred), min(1_000, preferred)]
-+    }
-+}
 diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/NativeCompactionFallback.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/NativeCompactionFallback.swift
 index 052ab01..8e818b6 100644
 --- a/Packages/ApelinAgent/Sources/ApelinAgent/Session/NativeCompactionFallback.swift
@@ -11002,3 +10973,69 @@ index 052ab01..8e818b6 100644
 +        )
      }
  }
+diff --git a/Packages/ApelinKit/Sources/ApelinProtocol/CompactionTuning.swift b/Packages/ApelinKit/Sources/ApelinProtocol/CompactionTuning.swift
+new file mode 100644
+index 0000000..0038f85
+--- /dev/null
++++ b/Packages/ApelinKit/Sources/ApelinProtocol/CompactionTuning.swift
+@@ -0,0 +1,60 @@
++import Foundation
++
++/// The two numbers a person may want to move, and where they are kept.
++///
++/// They are read by the agent worker — a different process from the app that
++/// shows them — so this lives in the module both link: a setting in one
++/// place and a reader in the other, with nothing to keep in sync but a
++/// string. The values sit in the App Group both entitlements carry, which is
++/// the only store the two processes share; `standard` is the fallback for a
++/// build without the group, where the reader still gets a sane answer.
++public enum CompactionTuning {
++    /// The store both processes read. The App Group is `group.wiki.qaq.apelin`
++    /// in the app, the widget and the workers' entitlements alike.
++    public static let groupName = "group.wiki.qaq.apelin"
++
++    public static var store: UserDefaults {
++        UserDefaults(suiteName: groupName) ?? .standard
++    }
++
++    /// Whether a send that would be refused may fold its tool output to fit.
++    public static let autoTrimKey = "compaction.autoTrim"
++
++    /// The character ceiling a tool result is folded at, the first time.
++    public static let toolOutputLimitKey = "compaction.toolOutputLimit"
++
++    /// On by default: a conversation that cannot be sent is worse than one
++    /// that has lost the middle of a build log.
++    public static var autoTrim: Bool {
++        store.object(forKey: autoTrimKey) as? Bool ?? true
++    }
++
++    public static func setAutoTrim(_ on: Bool) {
++        store.set(on, forKey: autoTrimKey)
++    }
++
++    /// 8000 is the design's first step — large enough to leave a short file
++    /// read alone, small enough to drop a whole build log.
++    public static var toolOutputLimit: Int {
++        let stored = store.integer(forKey: toolOutputLimitKey)
++        return stored > 0 ? stored : 8_000
++    }
++
++    public static func setToolOutputLimit(_ limit: Int) {
++        store.set(limit, forKey: toolOutputLimitKey)
++    }
++
++    /// The steps a failing compaction walks down, widest first, never above
++    /// what was asked for: 1000 is kwwk's own `/shake`, and going below it
++    /// only throws away the last of the output for no gain. Repeats are
++    /// dropped: a limit under 1000 would otherwise fold and re-compress the
++    /// same transcript three times, and each attempt is a paid call.
++    public static var retreatSteps: [Int] {
++        let preferred = toolOutputLimit
++        var steps: [Int] = []
++        for step in [preferred, min(2_000, preferred), min(1_000, preferred)] where !steps.contains(step) {
++            steps.append(step)
++        }
++        return steps
++    }
++}
