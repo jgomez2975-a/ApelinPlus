@@ -202,11 +202,15 @@ public actor BalanceService {
     ///
     /// - Parameter baseURL: instance id → its saved Base URL.
     /// - Parameter apiKey: instance id → its saved model key.
+    ///
+    /// Both lookups are `@Sendable`: they cross into the actor, and a
+    /// closure that captured a view model would drag main-actor isolation
+    /// along with it.
     @discardableResult
     public func refreshAll(
         instances: [ProviderInstance],
-        baseURL: (UUID) -> String?,
-        apiKey: (UUID) -> String?,
+        baseURL: @Sendable (UUID) -> String?,
+        apiKey: @Sendable (UUID) -> String?,
     ) async -> [UUID: BalanceSnapshot] {
         var results: [UUID: BalanceSnapshot] = [:]
         for instance in instances {
