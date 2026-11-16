@@ -1,14 +1,12 @@
 name: Apelin .deb (upstream)
 
 # Builds the real Apelin package on a GitHub macOS runner, so no Mac is
-# needed anywhere in the loop. Clones upstream, optionally applies the
-# patches in `patches/`, runs the project's own Makefile, uploads the .deb.
+# needed anywhere in the loop. Clones upstream, applies the patches in
+# `patches/`, runs the project's own Makefile, uploads the .deb.
 #
-# This is deliberately a separate workflow from `ci.yml`: that one gates
-# the ApelinPlus package, this one produces an installable artifact. They
-# fail for different reasons and should not block each other.
-#
-# Manual only. A .deb build is 10-20 macOS minutes; do not put it on push.
+# Runs on a push that touches the patches, so the package and the patch that
+# changed it stay one act. Manual dispatch stays available for every other
+# case: build a different tag, try the preview runner, or skip the patches.
 
 on:
   workflow_dispatch:
@@ -35,6 +33,11 @@ on:
         description: 'SKIP_HARNESS=1 (required: the device harness needs a phone)'
         type: boolean
         default: true
+  push:
+    branches: [main]
+    paths:
+      - 'patches/**'
+      - '.github/workflows/apelin-deb.yml'
 
 concurrency:
   group: deb-${{ github.ref }}
@@ -52,7 +55,9 @@ env:
 
 jobs:
   deb:
-    name: make deb (${{ inputs.flavor }})
+    # Everything below reads `inputs.x || '<default>'`: a push carries no
+    # inputs, and an empty `runs-on` is a job that never gets a runner.
+    name: make deb (${{ inputs.flavor || 'roothide' }}) · ${{ inputs.ref || 'v0.4.7' }}
     # Two images, two trade-offs:
     #
     # `macos-26` — stable GA, Xcode 26.6 with iOS SDK 26.5. Upstream pins
@@ -66,7 +71,7 @@ jobs:
     # attempt here was reclaimed two minutes into xcodebuild with
     # "The operation was canceled". Green when it holds, gone when it does
     # not.
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner || 'macos-26' }}
     timeout-minutes: 60
     steps:
       - name: Checkout builder (for patches)
@@ -84,24 +89,13 @@ jobs:
       - name: Clone upstream
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "${{ inputs.ref }}" "$UPSTREAM" upstream
+          git clone --depth 1 --branch "${{ inputs.ref || 'v0.4.7' }}" "$UPSTREAM" upstream
           cd upstream
           git log --oneline -1
           echo "files: $(git ls-files | wc -l)"
 
-          marketing=$(sed -n 's/^MARKETING_VERSION[[:space:]]*=[[:space:]]*//p' Configuration/Version.xcconfig)
-          build=$(sed -n 's/^CURRENT_PROJECT_VERSION[[:space:]]*=[[:space:]]*//p' Configuration/Version.xcconfig)
-          echo "MARKETING_VERSION=$marketing  CURRENT_PROJECT_VERSION=$build"
-
-          # `--depth 1` makes the Makefile's `git rev-list --count HEAD`
-          # default come out as 1, which would label a 0.4.7 build 0.4.7 (1)
-          # and put a number in Info.plist that disagrees with the xcconfig.
-          # Take the release's own number instead.
-          echo "BUILD_NUMBER=$build" >> "$GITHUB_ENV"
-          echo "APP_VERSION=$marketing" >> "$GITHUB_ENV"
-
       - name: Apply patches
-        if: ${{ inputs.apply_patches }}
+        if: ${{ github.event_name == 'push' || inputs.apply_patches }}
         run: |
           set -euo pipefail
           cd upstream
@@ -113,9 +107,32 @@ jobs:
           fi
           for p in "${patches[@]}"; do
             echo "--- applying $(basename "$p")"
-            git apply --3way --verbose "$p"
+            # Plain apply first: a --depth 1 clone has none of the blobs the
+            # patch names, so --3way falls back to an ordinary apply anyway
+            # and prints a warning that reads like a failure.
+            if git apply "$p"; then
+              echo "    applied"
+            else
+              echo "    plain apply failed, retrying with --3way"
+              git apply --3way --verbose "$p"
+            fi
           done
           git status --short
+
+      - name: Resolve version
+        run: |
+          set -euo pipefail
+          cd upstream
+          # After the patches: 0002 sets the version this build ships as.
+          marketing=$(sed -n 's/^MARKETING_VERSION[[:space:]]*=[[:space:]]*//p' Configuration/Version.xcconfig)
+          build=$(sed -n 's/^CURRENT_PROJECT_VERSION[[:space:]]*=[[:space:]]*//p' Configuration/Version.xcconfig)
+          echo "MARKETING_VERSION=$marketing  CURRENT_PROJECT_VERSION=$build"
+          # `--depth 1` makes the Makefile's `git rev-list --count HEAD`
+          # default come out as 1, which would label the build 0.4.7 (1) and
+          # put a number in Info.plist that disagrees with the xcconfig.
+          # Take the release's own number instead.
+          echo "BUILD_NUMBER=$build" >> "$GITHUB_ENV"
+          echo "APP_VERSION=$marketing" >> "$GITHUB_ENV"
 
       - name: Packaging tools
         run: |
@@ -138,9 +155,9 @@ jobs:
           set -uo pipefail
           cd upstream
           SKIP=""
-          if [ "${{ inputs.skip_checks }}" = "true" ]; then SKIP="SKIP_HARNESS=1"; fi
+          if [ "${{ github.event_name == 'push' || inputs.skip_checks }}" = "true" ]; then SKIP="SKIP_HARNESS=1"; fi
 
-          case "${{ inputs.flavor }}" in
+          case "${{ inputs.flavor || 'roothide' }}" in
             roothide) TARGET=deb-roothide ;;
             rootless) TARGET=deb-rootless ;;
             both)     TARGET=deb-all ;;
@@ -159,7 +176,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: apelin-${{ inputs.flavor }}-${{ github.run_number }}
+          name: apelin-${{ inputs.flavor || 'roothide' }}-${{ github.run_number }}
           path: |
             upstream/build/Packages/*.deb
           if-no-files-found: warn
