@@ -1,8 +1,262 @@
+diff --git a/Apelin/Interface/Chats/ChatContextController.swift b/Apelin/Interface/Chats/ChatContextController.swift
+new file mode 100644
+index 0000000..fc8f1df
+--- /dev/null
++++ b/Apelin/Interface/Chats/ChatContextController.swift
+@@ -0,0 +1,146 @@
++import ApelinProtocol
++import UIKit
++
++/// What the conversation is made of, by size.
++///
++/// The point is not the total — the bar under the navigation bar already says
++/// that — but which part is taking the room. A conversation that is almost
++/// all tool output wants one thing; one whose own replies are the bulk wants
++/// another.
++final class ChatContextController: TableController {
++    private let usage: ChatContextUsage
++    private let messageCount: Int
++
++    private enum Row: Hashable {
++        case amount
++        case bar
++        case part(ChatContextUsage.Kind)
++        case note
++    }
++
++    private enum Section: Hashable {
++        case head
++        case parts
++        case note
++    }
++
++    private lazy var dataSource = TableDataSource<Section, Row, Row>(
++        tableView: tableView,
++        identifier: { $0 },
++    ) { [weak self] _, _, row in
++        self?.cell(for: row)
++    }
++
++    init(usage: ChatContextUsage, messageCount: Int) {
++        self.usage = usage
++        self.messageCount = messageCount
++        super.init(style: .insetGrouped)
++    }
++
++    @available(*, unavailable)
++    required init?(coder _: NSCoder) {
++        fatalError("init(coder:) is not used")
++    }
++
++    override func viewDidLoad() {
++        super.viewDidLoad()
++        title = String(localized: "Context")
++        tableView.rowHeight = UITableView.automaticDimension
++        tableView.estimatedRowHeight = 48
++        rebuild()
++    }
++
++    private func rebuild() {
++        var sections: [(Section, [Row])] = [(.head, [.amount, .bar])]
++        let parts = ChatContextUsage.Kind.allCases.filter { (usage.byRole[$0] ?? 0) > 0 }
++        if !parts.isEmpty {
++            sections.append((.parts, parts.map(Row.part)))
++        }
++        sections.append((.note, [.note]))
++        dataSource.headerTitle = { section in
++            if case .parts = section {
++                return String(localized: "Messages")
++            }
++            return nil
++        }
++        dataSource.update(sections)
++    }
++
++    private func cell(for row: Row) -> UITableViewCell {
++        switch row {
++        case .amount: amountCell()
++        case .bar: barCell()
++        case let .part(kind): partCell(kind)
++        case .note: noteCell()
++        }
++    }
++
++    private func amountCell() -> UITableViewCell {
++        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
++        cell.selectionStyle = .none
++        var content = UIListContentConfiguration.cell()
++        content.text = usage.summary
++        content.textProperties.font = .systemFont(ofSize: 30, weight: .semibold)
++        content.textProperties.alignment = .center
++        content.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 20, leading: 16, bottom: 4, trailing: 16)
++        cell.contentConfiguration = content
++        return cell
++    }
++
++    private func barCell() -> UITableViewCell {
++        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
++        cell.selectionStyle = .none
++
++        let bar = UIProgressView(progressViewStyle: .default)
++        bar.progress = Float(usage.fraction)
++        bar.trackTintColor = .tertiarySystemFill
++        bar.progressTintColor = usage.isCritical ? .systemRed : (usage.isLarge ? .systemOrange : .tintColor)
++        bar.layer.cornerRadius = 3
++        bar.layer.masksToBounds = true
++
++        bar.translatesAutoresizingMaskIntoConstraints = false
++        cell.contentView.addSubview(bar)
++        let margins = cell.contentView.layoutMarginsGuide
++        NSLayoutConstraint.activate([
++            bar.leadingAnchor.constraint(equalTo: margins.leadingAnchor),
++            bar.trailingAnchor.constraint(equalTo: margins.trailingAnchor),
++            bar.topAnchor.constraint(equalTo: margins.topAnchor),
++            bar.bottomAnchor.constraint(equalTo: margins.bottomAnchor, constant: -8),
++        ])
++        return cell
++    }
++
++    private func partCell(_ kind: ChatContextUsage.Kind) -> UITableViewCell {
++        let cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
++        cell.selectionStyle = .none
++        var content = UIListContentConfiguration.valueCell()
++        content.text = Self.title(of: kind)
++        content.secondaryText = ChatContextUsage.abbreviated(usage.byRole[kind] ?? 0)
++        content.secondaryTextProperties.color = .secondaryLabel
++        cell.contentConfiguration = content
++        return cell
++    }
++
++    private func noteCell() -> UITableViewCell {
++        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
++        cell.selectionStyle = .none
++        var content = UIListContentConfiguration.cell()
++        // said plainly, because a count that is near the limit and an
++        // estimate are two different reasons not to trust the number
++        content.text = String(localized: "Estimated")
++        content.textProperties.color = .secondaryLabel
++        content.textProperties.font = .preferredFont(forTextStyle: .footnote)
++        content.textProperties.alignment = .center
++        cell.contentConfiguration = content
++        return cell
++    }
++
++    private static func title(of kind: ChatContextUsage.Kind) -> String {
++        switch kind {
++        case .prompt: String(localized: "Prompt")
++        case .reply: String(localized: "Reply")
++        case .tool: String(localized: "Tools")
++        case .activity: String(localized: "Activity")
++        }
++    }
++}
+diff --git a/Apelin/Interface/Chats/ChatContextUsage.swift b/Apelin/Interface/Chats/ChatContextUsage.swift
+new file mode 100644
+index 0000000..8822cd0
+--- /dev/null
++++ b/Apelin/Interface/Chats/ChatContextUsage.swift
+@@ -0,0 +1,86 @@
++import ApelinProtocol
++import Foundation
++
++/// How much of a model's window a conversation has taken.
++///
++/// The count is an estimate, not the tokenizer's: the app never sees the
++/// system prompt, the tool catalogue or the provider's own accounting, and
++/// asking the agent for them would need a round trip the page cannot wait
++/// on. `TokenEstimate` is the same four-characters-to-a-token guess the
++/// agent itself counts streamed output with, so a number from here and one
++/// from a run are at least measured the same way.
++///
++/// What it is good for is the shape: a conversation at 12% and one at 88%
++/// are visibly different, and that is what decides whether to compact.
++struct ChatContextUsage {
++    /// What the window is taken to be. kwwk's default for a model it does
++    /// not know.
++    static let window: Double = 128_000
++
++    let tokens: Double
++    /// What each kind of row contributes, for the inspector.
++    let byRole: [Kind: Double]
++
++    enum Kind: String, CaseIterable, Hashable {
++        case prompt
++        case reply
++        case tool
++        case activity
++    }
++
++    var fraction: Double {
++        min(1, tokens / Self.window)
++    }
++
++    var isLarge: Bool { fraction >= 0.75 }
++    var isCritical: Bool { fraction >= 0.9 }
++
++    static func measure(_ messages: [ChatMessage]) -> ChatContextUsage {
++        var byRole: [Kind: Double] = [:]
++        var total: Double = 0
++        for message in messages {
++            let counted = Self.cost(of: message)
++            guard counted > 0 else { continue }
++            total += counted
++            byRole[Self.kind(of: message.role), default: 0] += counted
++        }
++        return ChatContextUsage(tokens: total, byRole: byRole)
++    }
++
++    /// One row, and whatever its trace holds: a summary's tool calls are
++    /// sent with it, so they count with it.
++    private static func cost(of message: ChatMessage) -> Double {
++        var total = TokenEstimate.tokens(in: message.text)
++        if !message.detail.isEmpty {
++            total += TokenEstimate.tokens(in: message.detail)
++        }
++        for entry in message.trace {
++            total += cost(of: entry)
++        }
++        return total
++    }
++
++    private static func kind(of role: ChatMessage.Role) -> Kind {
++        switch role {
++        case .user: .prompt
++        case .assistant: .reply
++        case .tool: .tool
++        case .thinking, .approval, .compaction: .activity
++        }
++    }
++
++    /// `18.4k` — a count at the size a reader compares, not reads.
++    static func abbreviated(_ tokens: Double) -> String {
++        if tokens >= 1000 {
++            let thousands = tokens / 1000
++            return thousands >= 100
++                ? "\(Int(thousands.rounded()))k"
++                : String(format: "%.1fk", thousands)
++        }
++        return "\(Int(tokens.rounded()))"
++    }
++
++    var summary: String {
++        "\(Self.abbreviated(tokens)) / \(Self.abbreviated(Self.window))"
++    }
++}
 diff --git a/Apelin/Interface/Chats/ChatController.swift b/Apelin/Interface/Chats/ChatController.swift
-index ea62ed9..934f51c 100644
+index ea62ed9..c62eca4 100644
 --- a/Apelin/Interface/Chats/ChatController.swift
 +++ b/Apelin/Interface/Chats/ChatController.swift
-@@ -107,7 +107,19 @@ final class ChatController: UIViewController {
+@@ -31,6 +31,9 @@ final class ChatController: UIViewController {
+     private let composerSeparator = UIView()
+     private let topBlur = ChatTopBlurView()
+     private let latestMessageButton = UIButton(type: .system)
++    /// How full the window is, under the navigation bar. It sits above the
++    /// list rather than in it, so following a reply does not move it.
++    private let contextBar = ContextMeterView()
+     @objc dynamic private weak var tracePage: TraceController?
+     /// Builds the rows again once a running turn has gone quiet.
+     private let quietWatch = ChatQuietWatch()
+@@ -107,7 +110,23 @@ final class ChatController: UIViewController {
                  anchor: more,
                  onPrepareDistribution: { [weak self] prompt in self?.sendPrompt(prompt) },
                  onDelete: { [weak self] id in self?.onDelete?(id) },
@@ -16,6 +270,10 @@ index ea62ed9..934f51c 100644
 +                            title: String(localized: "Search"),
 +                            image: UIImage(systemName: "magnifyingglass"),
 +                        ) { [weak self] _ in self?.searchConversation() },
++                        UIAction(
++                            title: String(localized: "Context"),
++                            image: UIImage(systemName: "gauge"),
++                        ) { [weak self] _ in self?.showContext() },
 +                    ]
 +                    all.append(contentsOf: items)
 +                    completion(all)
@@ -23,7 +281,17 @@ index ea62ed9..934f51c 100644
              )
          }])
          more.accessibilityLabel = String(localized: "More")
-@@ -231,6 +243,11 @@ final class ChatController: UIViewController {
+@@ -125,6 +144,9 @@ final class ChatController: UIViewController {
+ 
+         replaceMessageList()
+         view.addSubview(topBlur)
++        // the meter sits at the bar's lower edge, so it belongs over the
++        // blur that softens what scrolls under it
++        view.bringSubviewToFront(contextBar)
+ 
+         composerBackground.backgroundColor = .pageBackground
+         composerSeparator.backgroundColor = .separator
+@@ -231,6 +253,21 @@ final class ChatController: UIViewController {
          }
      }
  
@@ -32,10 +300,52 @@ index ea62ed9..934f51c 100644
 +        presentPageAsFormSheet(ChatSearchController(messages: messages))
 +    }
 +
++    /// What the conversation is made of, by size.
++    private func showContext() {
++        presentPageAsFormSheet(
++            ChatContextController(
++                usage: ChatContextUsage.measure(messages),
++                messageCount: messages.count,
++            ),
++        )
++    }
++
      @objc dynamic private func replaceMessageList() {
          let contentInset = messageList.contentInset
          let indicatorInset = messageList.verticalScrollIndicatorInsets
-@@ -677,7 +694,11 @@ final class ChatController: UIViewController {
+@@ -305,6 +342,7 @@ final class ChatController: UIViewController {
+                 }
+         }
+         view.insertSubview(messageList, at: 0)
++        installContextBar()
+         // The composer is another overlay; explicitly identify the list
+         // whose scroll position drives the navigation bar's edge treatment.
+         setContentScrollView(messageList, for: .top)
+@@ -607,6 +645,23 @@ final class ChatController: UIViewController {
+         let visible = items.filter { !$0.role.isApproval }
+         messageList.apply(visible, animated: !isSwitchingChat && !UIAccessibility.isReduceMotionEnabled)
+         showApproval(waitingApproval(in: items))
++        contextBar.show(ChatContextUsage.measure(items))
++    }
++
++    /// Puts the window meter under the navigation bar, over the list rather
++    /// than in it: the list is rebuilt when the conversation changes, and a
++    /// subview of it would be thrown away with the old one.
++    private func installContextBar() {
++        if contextBar.superview == nil {
++            view.addSubview(contextBar)
++            contextBar.snp.makeConstraints { make in
++                make.top.equalTo(view.safeAreaLayoutGuide.snp.top)
++                make.leading.trailing.equalToSuperview()
++                make.height.equalTo(2)
++            }
++        } else {
++            view.bringSubviewToFront(contextBar)
++        }
+     }
+ 
+     /// The request among `items` the composer asks about: one the session's
+@@ -677,7 +732,11 @@ final class ChatController: UIViewController {
                  }
                  let selected = ComposerModelSelection.current
                  completion(accounts.map { account in
@@ -50,10 +360,10 @@ index ea62ed9..934f51c 100644
                                 return UIAction(title: model, state: checked ? .on : .off) { _ in
 diff --git a/Apelin/Interface/Chats/ChatSearchController.swift b/Apelin/Interface/Chats/ChatSearchController.swift
 new file mode 100644
-index 0000000..f7a2e66
+index 0000000..94563e2
 --- /dev/null
 +++ b/Apelin/Interface/Chats/ChatSearchController.swift
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,226 @@
 +import SnapKit
 +import Then
 +import UIKit
@@ -72,8 +382,10 @@ index 0000000..f7a2e66
 +    private let messages: [ChatMessage]
 +    private var matches: [ChatMessage] = []
 +    /// What a row shows: the query with the words around it, cut short, so a
-+    /// hit deep inside a long reply is readable without opening it.
-+    private var excerpts: [UUID: String] = [:]
++    /// hit deep inside a long reply is readable without opening it. The query
++    /// itself is marked in it — a row of nine hundred characters with the hit
++    /// somewhere in the middle is not a result anyone can scan.
++    private var excerpts: [UUID: NSAttributedString] = [:]
 +    private let search = UISearchController(searchResultsController: nil)
 +    private let emptyLabel = UILabel()
 +
@@ -138,14 +450,14 @@ index 0000000..f7a2e66
 +        }
 +
 +        var found: [ChatMessage] = []
-+        var notes: [UUID: String] = [:]
++        var notes: [UUID: NSAttributedString] = [:]
 +        for message in messages {
 +            guard let range = message.text.range(
 +                of: query,
 +                options: [.caseInsensitive, .diacriticInsensitive],
 +            ) else { continue }
 +            found.append(message)
-+            notes[message.id] = Self.excerpt(of: message.text, around: range)
++            notes[message.id] = Self.excerpt(of: message.text, around: range, marking: query)
 +        }
 +        matches = found
 +        excerpts = notes
@@ -154,12 +466,14 @@ index 0000000..f7a2e66
 +    }
 +
 +    /// The words around `range`, at most `limit` characters to each side, on
-+    /// one line, with an ellipsis where it was cut.
++    /// one line, with an ellipsis where it was cut and the query marked in it.
++    @MainActor
 +    private static func excerpt(
 +        of text: String,
 +        around range: Range<String.Index>,
++        marking query: String,
 +        limit: Int = 90,
-+    ) -> String {
++    ) -> NSAttributedString {
 +        let lower = text.index(range.lowerBound, offsetBy: -limit, limitedBy: text.startIndex)
 +            ?? text.startIndex
 +        let upper = text.index(range.upperBound, offsetBy: limit, limitedBy: text.endIndex)
@@ -173,7 +487,30 @@ index 0000000..f7a2e66
 +        piece = piece.trimmingCharacters(in: .whitespaces)
 +        if lower > text.startIndex { piece = "…" + piece }
 +        if upper < text.endIndex { piece += "…" }
-+        return piece
++        return marked(piece, query: query)
++    }
++
++    /// `piece` with every occurrence of `query` picked out.
++    @MainActor
++    private static func marked(_ piece: String, query: String) -> NSAttributedString {
++        let attributed = NSMutableAttributedString(string: piece)
++        guard !query.isEmpty else { return attributed }
++        var remaining = piece.startIndex ..< piece.endIndex
++        while let found = piece.range(
++            of: query,
++            options: [.caseInsensitive, .diacriticInsensitive],
++            range: remaining,
++        ) {
++            attributed.addAttributes(
++                [
++                    .backgroundColor: UIColor.tintColor.withAlphaComponent(0.18),
++                    .foregroundColor: UIColor.tintColor,
++                ],
++                range: NSRange(found, in: piece),
++            )
++            remaining = found.upperBound ..< piece.endIndex
++        }
++        return attributed
 +    }
 +
 +    // MARK: - Listing
@@ -190,9 +527,14 @@ index 0000000..f7a2e66
 +        let cell = tableView.dequeueReusableCell(withIdentifier: "match", for: indexPath)
 +        let message = matches[indexPath.row]
 +        var content = cell.defaultContentConfiguration()
-+        content.text = excerpts[message.id] ?? message.text
++        content.attributedText = excerpts[message.id] ?? NSAttributedString(string: message.text)
 +        content.textProperties.numberOfLines = 3
 +        content.textProperties.font = .preferredFont(forTextStyle: .body)
++        // which side said it: the same words read differently as a question
++        // and as an answer
++        content.image = UIImage(systemName: message.role == .user ? "person.fill" : "sparkles")
++        content.imageProperties.tintColor = .secondaryLabel
++        content.imageProperties.maximumSize = CGSize(width: 15, height: 15)
 +        cell.contentConfiguration = content
 +        return cell
 +    }
@@ -248,11 +590,141 @@ index 0000000..f7a2e66
 +        ).then { $0.accessibilityLabel = String(localized: "Copy") }
 +    }
 +}
+diff --git a/Apelin/Interface/Chats/ContextMeterView.swift b/Apelin/Interface/Chats/ContextMeterView.swift
+new file mode 100644
+index 0000000..fe375ea
+--- /dev/null
++++ b/Apelin/Interface/Chats/ContextMeterView.swift
+@@ -0,0 +1,40 @@
++import UIKit
++
++/// How full the window is, as a hairline under the navigation bar.
++///
++/// A conversation that is running out of room is worth knowing about before
++/// the message that fails, and the bar is the one place it can be said
++/// without taking a row. It stays away until half the window is gone: below
++/// that the number is interesting, not actionable.
++final class ContextMeterView: UIView {
++    private let fill = UIView()
++    private var fraction: CGFloat = 0
++
++    override init(frame: CGRect) {
++        super.init(frame: frame)
++        backgroundColor = .clear
++        isUserInteractionEnabled = false
++        clipsToBounds = true
++        addSubview(fill)
++        isHidden = true
++    }
++
++    @available(*, unavailable)
++    required init?(coder _: NSCoder) {
++        fatalError("init(coder:) is not used")
++    }
++
++    override func layoutSubviews() {
++        super.layoutSubviews()
++        fill.frame = CGRect(x: 0, y: 0, width: bounds.width * fraction, height: bounds.height)
++    }
++
++    func show(_ usage: ChatContextUsage) {
++        fraction = CGFloat(usage.fraction)
++        isHidden = usage.fraction < 0.5
++        fill.backgroundColor = usage.isCritical
++            ? .systemRed
++            : (usage.isLarge ? .systemOrange : UIColor.tertiaryLabel)
++        setNeedsLayout()
++    }
++}
 diff --git a/Apelin/Interface/Settings/Accounts/ModelProvidersController.swift b/Apelin/Interface/Settings/Accounts/ModelProvidersController.swift
-index e2446ce..91e15e9 100644
+index e2446ce..f0ff360 100644
 --- a/Apelin/Interface/Settings/Accounts/ModelProvidersController.swift
 +++ b/Apelin/Interface/Settings/Accounts/ModelProvidersController.swift
-@@ -140,6 +140,13 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -64,8 +64,23 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+     @objc private dynamic var query = ""
+     private var sections: [(Section, [Row])] = [(.status, [.status(.loading)])]
+     private var loader: Task<Void, Never>?
++    /// What each endpoint said was left on its key, by `rawValue`. Kept for
++    /// the life of this screen so a row can be redrawn from it without asking
++    /// again.
++    private var balances: [String: BalanceState] = [:]
++    private var balanceLoader: Task<Void, Never>?
+     private let search = UISearchController(searchResultsController: nil)
+ 
++    /// What asking one endpoint came back with.
++    private enum BalanceState {
++        case checking
++        case balance(ProviderBalance)
++        /// The route answered, with nothing in it that reads as a balance.
++        case unsupported
++        /// The ask itself did not get through.
++        case failed
++    }
++
+     init() {
+         super.init(style: .insetGrouped)
+     }
+@@ -77,6 +92,7 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+ 
+     deinit {
+         loader?.cancel()
++        balanceLoader?.cancel()
+     }
+ 
+     override func viewDidLoad() {
+@@ -129,6 +145,51 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+             guard let self else { return }
+             loaded = true
+             regroup()
++            loadBalances()
++        }
++    }
++
++    /// Asks each signed-in endpoint what is left on its key, and fills the
++    /// pills in as the answers arrive.
++    ///
++    /// One at a time, not all at once: these are somebody else's servers, and
++    /// six parallel requests every time the list appears is how a screen ends
++    /// up rate limited. An answer stays for the life of the screen, so coming
++    /// back from a row asks nothing.
++    private func loadBalances() {
++        balanceLoader?.cancel()
++        let endpoints = accounts.filter { $0.signedIn && $0.provider.kind == .openAICompatible }
++        let wanted = Set(endpoints.map(\.provider.rawValue))
++        balances = balances.filter { wanted.contains($0.key) }
++        guard !endpoints.isEmpty else { return }
++        balanceLoader = Task { [weak self] in
++            for account in endpoints {
++                guard !Task.isCancelled, let self else { return }
++                let state = await askBalance(account)
++                guard !Task.isCancelled else { return }
++                // the row's identity is the provider, and this changes
++                // nothing of the account, so the change is named explicitly
++                balances[account.provider.rawValue] = state
++                rebuild(changed: [account.provider.rawValue])
++            }
++        }
++    }
++
++    private func askBalance(_ account: AgentAccount) async -> BalanceState {
++        do {
++            let configuration = try await ApelinService.app.agentAPIConfiguration(
++                provider: account.provider,
++            )
++            let key = (configuration.values["apiKey"] ?? "")
++                .trimmingCharacters(in: .whitespacesAndNewlines)
++            let base = (configuration.values["baseUrl"] ?? "")
++                .trimmingCharacters(in: .whitespacesAndNewlines)
++            guard !key.isEmpty, !base.isEmpty else { return .unsupported }
++            return .balance(try await ProviderBalanceLookup.fetch(baseURL: base, apiKey: key))
++        } catch is ProviderBalanceError {
++            return .unsupported
++        } catch {
++            return .failed
+         }
+     }
+ 
+@@ -140,6 +201,13 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
      }
  
      @objc private dynamic func regroup() {
@@ -266,7 +738,7 @@ index e2446ce..91e15e9 100644
          if !loaded {
              sections = [(.status, [.status(.loading)])]
          } else if let failure, accounts.isEmpty {
-@@ -148,8 +155,10 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -148,8 +216,10 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
              let shown = query.isEmpty
                  ? accounts
                  : accounts.filter {
@@ -279,7 +751,7 @@ index e2446ce..91e15e9 100644
                          || ($0.account ?? "").localizedStandardContains(query)
                  }
              let groups: [(Group, [AgentAccount])] = [
-@@ -162,11 +171,9 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -162,11 +232,9 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
                  sections = [(.status, [.status(.noResults)])]
              }
          }
@@ -292,30 +764,140 @@ index e2446ce..91e15e9 100644
      private func account(at indexPath: IndexPath) -> AgentAccount? {
          guard case let .account(account)? = dataSource.value(at: indexPath) else { return nil }
          return account
-@@ -199,7 +206,10 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -198,34 +266,55 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+         }
      }
  
-     /// The provider's mark and name on one line; signed in, who as under the
+-    /// The provider's mark and name on one line; signed in, who as under the
 -    /// name and a `…` menu at the end.
-+    /// name and a `…` menu at the end. An endpoint signed in to carries the
-+    /// name it was given, with its host still under it; an endpoint that is
-+    /// only on offer keeps the provider's own name, so an empty slot cannot
-+    /// read as one that is already set up.
++    /// The mark, the name it answers to, what it points at, and a `…` menu at
++    /// the end. A signed-in endpoint carries the name it was given with its
++    /// host underneath; one that is only on offer keeps the provider's own
++    /// name, so an empty slot cannot read as one that is already set up.
++    ///
++    /// The mark is drawn rather than the provider's artwork: several endpoints
++    /// share one logo, and a colour plus the name's first character is what
++    /// tells them apart before the host is read.
      private func accountCell(_ account: AgentAccount) -> UITableViewCell {
-         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
-         var content: UIListContentConfiguration
-@@ -215,7 +225,9 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
-             content = .cell()
-             cell.accessoryType = .disclosureIndicator
-         }
--        content.text = account.provider.displayName
-+        content.text = account.signedIn
+-        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+-        var content: UIListContentConfiguration
++        let cell = ProviderAccountCell(style: .default, reuseIdentifier: ProviderAccountCell.reuseIdentifier)
++        let name = account.signedIn
 +            ? ProviderLabel.displayName(of: account.provider)
 +            : account.provider.displayName
-         content.textProperties.numberOfLines = 1
-         content.image = account.provider.icon
-         content.imageProperties.maximumSize = CGSize(width: 29, height: 29)
-@@ -242,12 +254,12 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
++        cell.show(
++            title: name,
++            subtitle: Self.detailLine(account),
++            initial: Self.initial(for: account),
++            tone: ProviderTint.resolvedTone(for: account.provider.rawValue),
++            balance: balanceBadge(for: account),
++        )
+         if account.signedIn {
+-            content = .stackedValueCell()
+-            content.secondaryText = Self.signedInLine(account)
+-            content.secondaryTextProperties.color = .secondaryLabel
+-            content.secondaryTextProperties.numberOfLines = 1
+-
+             cell.accessoryView = menuButton(account)
++            cell.accessoryType = .none
+             cell.selectionStyle = .none
+         } else {
+-            content = .cell()
++            cell.accessoryView = nil
+             cell.accessoryType = .disclosureIndicator
++            cell.selectionStyle = .default
+         }
+-        content.text = account.provider.displayName
+-        content.textProperties.numberOfLines = 1
+-        content.image = account.provider.icon
+-        content.imageProperties.maximumSize = CGSize(width: 29, height: 29)
+-        content.imageProperties.reservedLayoutSize = CGSize(width: 29, height: 29)
+-        cell.contentConfiguration = content
+         return cell
+     }
+ 
+-    private static func signedInLine(_ account: AgentAccount) -> String {
+-        var parts = [account.account ?? String(localized: "Signed In")]
++    /// What the row says under the name.
++    ///
++    /// An endpoint is known by its host — that is the whole difference between
++    /// two relays on the same platform — so the host comes first and the name
++    /// of the platform is left out: the mark already says it. Every other
++    /// provider is known by its platform and who is signed in.
++    private static func detailLine(_ account: AgentAccount) -> String {
++        var parts: [String] = []
++        let who = account.account ?? ""
++        if account.provider.kind == .openAICompatible {
++            if !who.isEmpty { parts.append(Self.host(of: who)) }
++        } else if account.signedIn {
++            parts.append(account.provider.displayName)
++            if !who.isEmpty { parts.append(who) }
++        } else {
++            parts.append(account.provider.displayName)
++        }
+         if let expiresAt = account.expiresAt {
+             let date = expiresAt.formatted(date: .abbreviated, time: .shortened)
+             parts.append(expiresAt < Date() ? String(localized: "Expired \(date)") : String(localized: "Until \(date)"))
+@@ -233,6 +322,58 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+         return parts.joined(separator: " · ")
+     }
+ 
++    /// `api.yunwu.ai` out of whatever address the endpoint was signed in to,
++    /// which is the part a person recognises.
++    private static func host(of address: String) -> String {
++        guard let host = URL(string: address)?.host, !host.isEmpty else { return address }
++        return host
++    }
++
++    /// The character the mark draws. A named endpoint draws the name's first;
++    /// one that was never named draws its host's, because every unnamed
++    /// endpoint shares one name and would otherwise be the same letter.
++    private static func initial(for account: AgentAccount) -> String {
++        if let name = ProviderLabel.name(of: account.provider) {
++            return ProviderTint.initial(for: name)
++        }
++        if account.provider.kind == .openAICompatible, let who = account.account, !who.isEmpty {
++            return ProviderTint.initial(for: Self.host(of: who))
++        }
++        return ProviderTint.initial(for: account.provider.displayName)
++    }
++
++    /// What the row draws in its balance pill, from what is already known.
++    ///
++    /// A check that was asked for and came back lands in `balances`; until
++    /// then a row that can be asked says so, and a row that cannot says
++    /// nothing rather than claim a number it does not have.
++    private func balanceBadge(for account: AgentAccount) -> ProviderBalanceBadge {
++        guard account.signedIn, account.provider.kind == .openAICompatible else { return .hidden }
++        switch balances[account.provider.rawValue] {
++        case let .some(.balance(balance)):
++            return Self.badge(for: balance)
++        case .some(.checking):
++            return .checking
++        case .some(.unsupported):
++            return .hidden
++        case .some(.failed):
++            return .hidden
++        case .none:
++            return .checking
++        }
++    }
++
++    private static func badge(for balance: ProviderBalance) -> ProviderBalanceBadge {
++        let formatter = NumberFormatter()
++        formatter.numberStyle = .currency
++        formatter.currencyCode = balance.currency
++        formatter.minimumFractionDigits = 2
++        formatter.maximumFractionDigits = 2
++        let text = formatter.string(from: NSNumber(value: balance.remaining))
++            ?? "\(balance.currency) \(balance.remaining)"
++        return .amount(text, low: balance.remaining < 5)
++    }
++
+     /// `…` with no circle, its menu read each time it opens.
+     private func menuButton(_ account: AgentAccount) -> UIButton {
+         let button = UIButton(type: .system)
+@@ -242,12 +383,12 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
              completion(self?.accountActions(account) ?? [])
          }])
          button.frame = CGRect(x: 0, y: 0, width: 32, height: 44)
@@ -330,7 +912,7 @@ index e2446ce..91e15e9 100644
              UIAction(
                  title: String(localized: "Edit"),
                  image: UIImage(systemName: account.isAPIKeyAccount ? "pencil" : "arrow.clockwise"),
-@@ -260,16 +272,34 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -260,16 +401,34 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
              ) { [weak self] _ in
                  self?.presentPageAsFormSheet(ModelActivationController(account: account))
              },
@@ -374,7 +956,7 @@ index e2446ce..91e15e9 100644
      }
  
      override func tableView(_: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
-@@ -304,11 +334,13 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -304,11 +463,13 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
          presentPageAsFormSheet(page)
      }
  
@@ -391,7 +973,7 @@ index e2446ce..91e15e9 100644
          presentConfirmation(
              title: "Sign Out of \(name)?",
              message: "Agent sessions that use it stop working until you sign in again.",
-@@ -330,4 +362,59 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
+@@ -330,4 +491,67 @@ final class ModelProvidersController: TableController, UISearchResultsUpdating {
              }
          }
      }
@@ -443,14 +1025,267 @@ index e2446ce..91e15e9 100644
 +                    presentNotice(title: "Balance", message: "This endpoint does not report a balance.")
 +                    return
 +                }
-+                let balance = try await ProviderBalanceLookup.fetch(baseURL: base, apiKey: key)
-+                presentNotice(title: "Balance", message: balance.described)
++                // a page, not an alert: the amount is worth seeing next to
++                // what it is out of, and worth asking for again
++                navigationController?.pushViewController(
++                    ProviderBalanceScreen(
++                        name: ProviderLabel.displayName(of: account.provider),
++                        baseURL: base,
++                        apiKey: key,
++                    ),
++                    animated: true,
++                )
 +            } catch {
 +                presentNotice(title: "Balance", message: "This endpoint does not report a balance.")
 +            }
 +        }
 +    }
  }
+diff --git a/Apelin/Interface/Settings/Accounts/ProviderAccountCell.swift b/Apelin/Interface/Settings/Accounts/ProviderAccountCell.swift
+new file mode 100644
+index 0000000..15b0c37
+--- /dev/null
++++ b/Apelin/Interface/Settings/Accounts/ProviderAccountCell.swift
+@@ -0,0 +1,239 @@
++import UIKit
++
++/// What a mark says before the name is read: a colour, and one character.
++///
++/// The shape is the design's: a small rounded square, 29 points, filled with a
++/// two-stop gradient that runs corner to corner.
++final class ProviderMarkView: UIView {
++    private let gradient = CAGradientLayer()
++    private let letter = UILabel()
++
++    override init(frame: CGRect) {
++        super.init(frame: frame)
++        layer.cornerRadius = 7.5
++        layer.cornerCurve = .continuous
++        layer.masksToBounds = true
++        // the design's hairline, so a pale tone keeps an edge on a pale cell
++        layer.borderWidth = 0.5
++        layer.borderColor = UIColor.black.withAlphaComponent(0.08).cgColor
++
++        gradient.startPoint = CGPoint(x: 0.15, y: 0)
++        gradient.endPoint = CGPoint(x: 0.85, y: 1)
++        layer.addSublayer(gradient)
++
++        letter.font = .systemFont(ofSize: 13, weight: .bold)
++        letter.textColor = .white
++        letter.textAlignment = .center
++        letter.adjustsFontSizeToFitWidth = true
++        letter.minimumScaleFactor = 0.7
++        letter.translatesAutoresizingMaskIntoConstraints = false
++        addSubview(letter)
++        NSLayoutConstraint.activate([
++            letter.centerXAnchor.constraint(equalTo: centerXAnchor),
++            letter.centerYAnchor.constraint(equalTo: centerYAnchor),
++            letter.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.82),
++        ])
++    }
++
++    @available(*, unavailable)
++    required init?(coder _: NSCoder) {
++        fatalError("init(coder:) is not used")
++    }
++
++    override func layoutSubviews() {
++        super.layoutSubviews()
++        // a resize must not animate the fill from its old bounds
++        CATransaction.begin()
++        CATransaction.setDisableActions(true)
++        gradient.frame = bounds
++        CATransaction.commit()
++    }
++
++    override var intrinsicContentSize: CGSize {
++        CGSize(width: 29, height: 29)
++    }
++
++    func show(initial: String, tone: ProviderTint.Tone) {
++        letter.text = initial
++        gradient.colors = [tone.top.cgColor, tone.bottom.cgColor]
++    }
++}
++
++/// What a row says about an endpoint's balance once it has been asked.
++enum ProviderBalanceBadge: Equatable {
++    /// Nothing has been asked yet, or there is nothing to ask.
++    case hidden
++    case checking
++    /// A number, and whether it is low enough to read as a warning.
++    case amount(String, low: Bool)
++    /// A word instead of a number: a subscription, or a route that cannot be asked.
++    case note(String)
++}
++
++/// A pill with its own padding, which a plain `UILabel` does not have.
++///
++/// `intrinsicContentSize` is overridden rather than the label being wrapped in
++/// a view, so a cell can size itself from one constraint.
++final class ProviderPillLabel: UILabel {
++    var insets = UIEdgeInsets(top: 3, left: 7, bottom: 3, right: 7) {
++        didSet { invalidateIntrinsicContentSize() }
++    }
++
++    override init(frame: CGRect) {
++        super.init(frame: frame)
++        font = .systemFont(ofSize: 11.5, weight: .semibold)
++        adjustsFontForContentSizeCategory = false
++        layer.cornerRadius = 6
++        layer.cornerCurve = .continuous
++        layer.masksToBounds = true
++        textAlignment = .center
++    }
++
++    @available(*, unavailable)
++    required init?(coder _: NSCoder) {
++        fatalError("init(coder:) is not used")
++    }
++
++    override func drawText(in rect: CGRect) {
++        super.drawText(in: rect.inset(by: insets))
++    }
++
++    override var intrinsicContentSize: CGSize {
++        let size = super.intrinsicContentSize
++        return CGSize(
++            width: size.width + insets.left + insets.right,
++            height: max(20, size.height + insets.top + insets.bottom),
++        )
++    }
++
++    override func sizeThatFits(_ size: CGSize) -> CGSize {
++        let fitted = super.sizeThatFits(size)
++        return CGSize(
++            width: fitted.width + insets.left + insets.right,
++            height: max(20, fitted.height + insets.top + insets.bottom),
++        )
++    }
++}
++
++/// One provider in Settings ▸ Model Providers.
++///
++/// Three things on one line, in the order they are read: the mark, the name
++/// the endpoint answers to with its host underneath, and — at the end, where
++/// the eye goes to compare — what is left on the key. The `…` menu is the
++/// table's accessory, set by the controller.
++final class ProviderAccountCell: UITableViewCell {
++    static let reuseIdentifier = "ProviderAccountCell"
++
++    private let mark = ProviderMarkView()
++    private let title = UILabel()
++    private let subtitle = UILabel()
++    private let badge = ProviderPillLabel()
++    private let titleRow = UIStackView()
++    private let texts = UIStackView()
++    private let row = UIStackView()
++
++    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
++        super.init(style: style, reuseIdentifier: reuseIdentifier)
++
++        title.font = .preferredFont(forTextStyle: .body)
++        title.adjustsFontForContentSizeCategory = true
++        title.numberOfLines = 1
++        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
++
++        subtitle.font = .preferredFont(forTextStyle: .footnote)
++        subtitle.adjustsFontForContentSizeCategory = true
++        subtitle.textColor = .secondaryLabel
++        subtitle.numberOfLines = 1
++        subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
++
++        badge.setContentHuggingPriority(.required, for: .horizontal)
++        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
++        badge.isHidden = true
++
++        titleRow.axis = .horizontal
++        titleRow.alignment = .center
++        titleRow.spacing = 6
++        titleRow.addArrangedSubview(title)
++        titleRow.addArrangedSubview(badge)
++
++        texts.axis = .vertical
++        texts.spacing = 1
++        texts.addArrangedSubview(titleRow)
++        texts.addArrangedSubview(subtitle)
++
++        row.axis = .horizontal
++        row.alignment = .center
++        row.spacing = 11
++        row.addArrangedSubview(mark)
++        row.addArrangedSubview(texts)
++
++        contentView.addSubview(row)
++        row.translatesAutoresizingMaskIntoConstraints = false
++        NSLayoutConstraint.activate([
++            mark.widthAnchor.constraint(equalToConstant: 29),
++            mark.heightAnchor.constraint(equalToConstant: 29),
++            row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
++            row.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -6),
++            row.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 9),
++            row.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -9),
++        ])
++    }
++
++    @available(*, unavailable)
++    required init?(coder _: NSCoder) {
++        fatalError("init(coder:) is not used")
++    }
++
++    override func prepareForReuse() {
++        super.prepareForReuse()
++        badge.isHidden = true
++        badge.text = nil
++    }
++
++    /// Draws the row. `subtitle` is the host (or who is signed in), `initial`
++    /// and `tone` are the mark, and `balance` arrives later for a row whose
++    /// endpoint is being asked.
++    func show(
++        title name: String,
++        subtitle detail: String,
++        initial: String,
++        tone: ProviderTint.Tone,
++        balance: ProviderBalanceBadge = .hidden,
++    ) {
++        title.text = name
++        subtitle.text = detail
++        subtitle.isHidden = detail.isEmpty
++        mark.show(initial: initial, tone: tone)
++        show(balance)
++    }
++
++    /// Fills in the balance pill without touching the rest of the row, so a
++    /// slow endpoint does not redraw the name under the finger.
++    func show(_ balance: ProviderBalanceBadge) {
++        switch balance {
++        case .hidden:
++            badge.isHidden = true
++        case .checking:
++            badge.isHidden = false
++            badge.text = "···"
++            badge.textColor = .secondaryLabel
++            badge.backgroundColor = UIColor.tertiarySystemFill
++        case let .amount(text, low):
++            badge.isHidden = false
++            badge.text = text
++            if low {
++                badge.textColor = UIColor(red: 0.64, green: 0.35, blue: 0, alpha: 1)
++                badge.backgroundColor = UIColor(red: 1, green: 0.58, blue: 0, alpha: 0.15)
++            } else {
++                badge.textColor = UIColor(red: 0.12, green: 0.48, blue: 0.22, alpha: 1)
++                badge.backgroundColor = UIColor(red: 0.20, green: 0.78, blue: 0.35, alpha: 0.13)
++            }
++        case let .note(text):
++            badge.isHidden = false
++            badge.text = text
++            badge.textColor = .secondaryLabel
++            badge.backgroundColor = UIColor.tertiarySystemFill
++        }
++        badge.invalidateIntrinsicContentSize()
++    }
++}
 diff --git a/Apelin/Interface/Settings/Accounts/ProviderBalance.swift b/Apelin/Interface/Settings/Accounts/ProviderBalance.swift
 new file mode 100644
 index 0000000..6e29209
@@ -626,21 +1461,232 @@ index 0000000..6e29209
 +        return body
 +    }
 +}
+diff --git a/Apelin/Interface/Settings/Accounts/ProviderBalanceScreen.swift b/Apelin/Interface/Settings/Accounts/ProviderBalanceScreen.swift
+new file mode 100644
+index 0000000..68b04e6
+--- /dev/null
++++ b/Apelin/Interface/Settings/Accounts/ProviderBalanceScreen.swift
+@@ -0,0 +1,201 @@
++import ApelinProtocol
++import UIKit
++
++/// What one endpoint says is left on its key, in full.
++///
++/// The list draws a pill, which is a number; this draws what the number is
++/// out of, because the same $16.79 means something different on a key
++/// topped up to $20 and on one topped up to $500. A route that keeps a
++/// balance behind a login answers the key with nothing, and that is said as
++/// what it is: no balance to report, not a key that failed.
++final class ProviderBalanceScreen: TableController {
++    private let providerName: String
++    private let baseURL: String
++    private let apiKey: String
++
++    private var balance: ProviderBalance?
++    private var failure: String?
++    private var loading = true
++
++    private enum Row: Hashable {
++        case amount
++        case detail
++        case message
++    }
++
++    private enum Section: Hashable {
++        case balance
++        case message
++    }
++
++    private lazy var dataSource = TableDataSource<Section, Row, Row>(
++        tableView: tableView,
++        identifier: { $0 },
++    ) { [weak self] _, _, row in
++        self?.cell(for: row)
++    }
++
++    @objc dynamic lazy var refreshItem = UIBarButtonItem(
++        title: String(localized: "Refresh"),
++        primaryAction: UIAction { [weak self] _ in self?.load() },
++    )
++
++    init(name: String, baseURL: String, apiKey: String) {
++        providerName = name
++        self.baseURL = baseURL
++        self.apiKey = apiKey
++        super.init(style: .insetGrouped)
++    }
++
++    @available(*, unavailable)
++    required init?(coder _: NSCoder) {
++        fatalError("init(coder:) is not used")
++    }
++
++    override func viewDidLoad() {
++        super.viewDidLoad()
++        title = providerName
++        tableView.rowHeight = UITableView.automaticDimension
++        tableView.estimatedRowHeight = 60
++        navigationItem.rightBarButtonItem = refreshItem
++        rebuild()
++        load()
++    }
++
++    @objc private dynamic func load() {
++        loading = true
++        failure = nil
++        rebuild()
++        Task { [weak self] in
++            guard let self else { return }
++            do {
++                let balance = try await ProviderBalanceLookup.fetch(baseURL: baseURL, apiKey: apiKey)
++                self.balance = balance
++                self.failure = nil
++            } catch is ProviderBalanceError {
++                self.balance = nil
++                self.failure = String(localized: "This endpoint does not report a balance.")
++            } catch {
++                self.balance = nil
++                self.failure = error.localizedDescription
++            }
++            self.loading = false
++            self.rebuild()
++        }
++    }
++
++    private func rebuild() {
++        var sections: [(Section, [Row])] = []
++        if let balance {
++            sections.append((.balance, [.amount, .detail]))
++        }
++        if let failure {
++            sections.append((.message, [.message]))
++        } else if loading, balance == nil {
++            sections.append((.message, [.message]))
++        }
++        dataSource.update(sections)
++    }
++
++    private func cell(for row: Row) -> UITableViewCell {
++        switch row {
++        case .amount:
++            return amountCell()
++        case .detail:
++            return detailCell()
++        case .message:
++            return messageCell()
++        }
++    }
++
++    private func amountCell() -> UITableViewCell {
++        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
++        cell.selectionStyle = .none
++        var content = UIListContentConfiguration.cell()
++        content.text = balance.map(Self.left) ?? "—"
++        content.textProperties.font = .systemFont(ofSize: 34, weight: .semibold)
++        content.textProperties.alignment = .center
++        content.textProperties.color = .label
++        content.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 22, leading: 16, bottom: 8, trailing: 16)
++        cell.contentConfiguration = content
++        return cell
++    }
++
++    /// What was there to start with, and how much of it is gone: a bar plus
++    /// the two numbers it is drawn from.
++    private func detailCell() -> UITableViewCell {
++        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
++        cell.selectionStyle = .none
++
++        let bar = UIProgressView(progressViewStyle: .default)
++        bar.trackTintColor = .tertiarySystemFill
++        bar.progressTintColor = .tintColor
++        bar.layer.cornerRadius = 3
++        bar.layer.masksToBounds = true
++
++        let line = UILabel()
++        line.font = .preferredFont(forTextStyle: .footnote)
++        line.adjustsFontForContentSizeCategory = true
++        line.textColor = .secondaryLabel
++        line.textAlignment = .center
++        line.text = Self.usageLine(balance)
++
++        let stack = UIStackView(arrangedSubviews: [bar, line])
++        stack.axis = .vertical
++        stack.spacing = 10
++        stack.translatesAutoresizingMaskIntoConstraints = false
++        cell.contentView.addSubview(stack)
++        let margins = cell.contentView.layoutMarginsGuide
++        NSLayoutConstraint.activate([
++            stack.leadingAnchor.constraint(equalTo: margins.leadingAnchor),
++            stack.trailingAnchor.constraint(equalTo: margins.trailingAnchor),
++            stack.topAnchor.constraint(equalTo: margins.topAnchor, constant: 2),
++            stack.bottomAnchor.constraint(equalTo: margins.bottomAnchor, constant: -4),
++        ])
++
++        if let balance, let limit = balance.limit, limit > 0 {
++            bar.progress = Float(max(0, min(1, (limit - balance.remaining) / limit)))
++        } else {
++            // nothing to divide by: a bar would be a claim the endpoint never made
++            bar.isHidden = true
++        }
++        return cell
++    }
++
++    private func messageCell() -> UITableViewCell {
++        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
++        cell.selectionStyle = .none
++        var content = UIListContentConfiguration.cell()
++        content.text = loading && failure == nil
++            ? String(localized: "Loading…")
++            : failure
++        content.textProperties.color = .secondaryLabel
++        content.textProperties.font = .preferredFont(forTextStyle: .footnote)
++        content.textProperties.alignment = .center
++        content.textProperties.numberOfLines = 0
++        cell.contentConfiguration = content
++        return cell
++    }
++
++    private static func left(_ balance: ProviderBalance) -> String {
++        money(balance.remaining, currency: balance.currency)
++    }
++
++    private static func usageLine(_ balance: ProviderBalance?) -> String {
++        guard let balance else { return "" }
++        guard let limit = balance.limit, limit > 0 else {
++            return money(balance.remaining, currency: balance.currency)
++        }
++        let used = max(0, limit - balance.remaining)
++        return "\(money(used, currency: balance.currency)) / \(money(limit, currency: balance.currency))"
++    }
++
++    private static func money(_ amount: Double, currency: String) -> String {
++        let formatter = NumberFormatter()
++        formatter.numberStyle = .currency
++        formatter.currencyCode = currency
++        formatter.minimumFractionDigits = 2
++        formatter.maximumFractionDigits = 2
++        return formatter.string(from: NSNumber(value: amount)) ?? "\(currency) \(amount)"
++    }
++}
 diff --git a/Apelin/Interface/Settings/Accounts/ProviderKeyFormController.swift b/Apelin/Interface/Settings/Accounts/ProviderKeyFormController.swift
-index 837c2a9..77b8ea5 100644
+index 837c2a9..aea3b59 100644
 --- a/Apelin/Interface/Settings/Accounts/ProviderKeyFormController.swift
 +++ b/Apelin/Interface/Settings/Accounts/ProviderKeyFormController.swift
-@@ -6,6 +6,9 @@ import UIKit
+@@ -6,6 +6,13 @@ import UIKit
  final class ProviderKeyFormController: TableController {
      var onSubmit: (([AgentSignInField: String]) -> Void)?
      var onSwitchMethod: ((AgentSignInMethod) -> Void)?
 +    /// Called with what the Name row holds when the form is sent. A name is
 +    /// not a sign-in field: it goes nowhere near the credential.
 +    var onLabelChange: ((String) -> Void)?
++    /// Called with the colour picked, as it is picked: a colour is readable
++    /// on the row behind this form, and waiting for a submit to show it would
++    /// hide the one thing it is for.
++    var onTintChange: ((Int?) -> Void)?
  
      @objc dynamic var isSubmitting = false {
          didSet {
-@@ -18,14 +21,23 @@ final class ProviderKeyFormController: TableController {
+@@ -18,14 +25,30 @@ final class ProviderKeyFormController: TableController {
      private let keys: [SignInProgress.KeyField]
      private let alternatives: [AgentSignInMethod]
      private let initialValues: [String: String]
@@ -653,18 +1699,25 @@ index 837c2a9..77b8ea5 100644
      private var cells: [AgentSignInField: UITableViewCell] = [:]
 +    private var labelField: UITextField?
 +    private var labelCell: UITableViewCell?
++    /// The colour this endpoint draws in the list, as chosen; `nil` is the
++    /// one it picks for itself.
++    private var tintIndex: Int?
++    private var tintCell: UITableViewCell?
++    private weak var tintButton: UIButton?
      private enum Row: Hashable {
 +        case label
++        case tint
          case field(AgentSignInField)
          case method(AgentSignInMethod)
      }
  
      private enum Section: Hashable {
 +        case label
++        case tint
          case field(AgentSignInField)
          case methods
      }
-@@ -42,10 +54,18 @@ final class ProviderKeyFormController: TableController {
+@@ -42,10 +65,20 @@ final class ProviderKeyFormController: TableController {
          primaryAction: UIAction { [weak self] _ in self?.submit() },
      )
  
@@ -675,16 +1728,18 @@ index 837c2a9..77b8ea5 100644
 +        initialValues: [String: String] = [:],
 +        label: String? = nil,
 +        showsLabel: Bool = false,
++        tint: Int? = nil,
 +    ) {
          self.keys = keys.filter { $0.field != .defaultModel }
          self.alternatives = alternatives
          self.initialValues = initialValues
 +        labelValue = label
 +        self.showsLabel = showsLabel
++        tintIndex = tint
          super.init(style: .insetGrouped)
      }
  
-@@ -59,6 +79,27 @@ final class ProviderKeyFormController: TableController {
+@@ -59,6 +92,28 @@ final class ProviderKeyFormController: TableController {
          tableView.keyboardDismissMode = .interactive
          tableView.rowHeight = UITableView.automaticDimension
          tableView.estimatedRowHeight = 52
@@ -708,11 +1763,12 @@ index 837c2a9..77b8ea5 100644
 +            label.addAction(UIAction { [weak self] _ in self?.focusFirstField() }, for: .editingDidEndOnExit)
 +            labelField = label
 +            labelCell = cell(containing: label)
++            tintCell = makeTintCell()
 +        }
          for (index, key) in keys.enumerated() {
              let field = UITextField()
              field.font = .preferredFont(forTextStyle: .body)
-@@ -86,12 +127,14 @@ final class ProviderKeyFormController: TableController {
+@@ -86,12 +141,15 @@ final class ProviderKeyFormController: TableController {
          submitItem.accessibilityLabel = String(localized: "Fetch Models")
          updateSubmit()
          dataSource.headerTitle = { section in
@@ -720,18 +1776,19 @@ index 837c2a9..77b8ea5 100644
 -                return field.title
 +            switch section {
 +            case .label: return String(localized: "Name")
++            case .tint: return nil
 +            case let .field(field): return field.title
 +            case .methods: return nil
              }
 -            return nil
          }
 -        var sections: [(Section, [Row])] = keys.map { (.field($0.field), [.field($0.field)]) }
-+        var sections: [(Section, [Row])] = showsLabel ? [(.label, [.label])] : []
++        var sections: [(Section, [Row])] = showsLabel ? [(.label, [.label]), (.tint, [.tint])] : []
 +        sections += keys.map { (.field($0.field), [.field($0.field)]) }
          if !alternatives.isEmpty {
              sections.append((.methods, alternatives.map(Row.method)))
          }
-@@ -100,11 +143,21 @@ final class ProviderKeyFormController: TableController {
+@@ -100,11 +158,21 @@ final class ProviderKeyFormController: TableController {
  
      override func viewDidAppear(_ animated: Bool) {
          super.viewDidAppear(animated)
@@ -755,7 +1812,7 @@ index 837c2a9..77b8ea5 100644
      @objc private dynamic func cell(containing input: UIView) -> UITableViewCell {
          let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
          cell.selectionStyle = .none
-@@ -141,6 +194,8 @@ final class ProviderKeyFormController: TableController {
+@@ -141,6 +209,8 @@ final class ProviderKeyFormController: TableController {
      @objc private dynamic func updateSubmit() {
          submitItem.isEnabled = isReady && !isSubmitting
          fields.values.forEach { $0.isEnabled = !isSubmitting }
@@ -764,7 +1821,7 @@ index 837c2a9..77b8ea5 100644
      }
  
      @objc private dynamic func advance(from index: Int) {
-@@ -154,10 +209,16 @@ final class ProviderKeyFormController: TableController {
+@@ -154,10 +224,19 @@ final class ProviderKeyFormController: TableController {
      @objc private dynamic func submit() {
          guard isReady, !isSubmitting else { return }
          view.endEditing(true)
@@ -778,17 +1835,105 @@ index 837c2a9..77b8ea5 100644
 +        if case .label = row {
 +            return labelCell
 +        }
++        if case .tint = row {
++            return tintCell
++        }
          if case let .field(field) = row {
              return cells[field]
          }
-@@ -175,6 +236,7 @@ final class ProviderKeyFormController: TableController {
+@@ -175,6 +254,8 @@ final class ProviderKeyFormController: TableController {
          tableView.deselectRow(at: indexPath, animated: true)
          guard let row = dataSource.value(at: indexPath) else { return }
          switch row {
 +        case .label: labelField?.becomeFirstResponder()
++        case .tint: break // the swatch is a button with a menu of its own
          case let .field(field): fields[field]?.becomeFirstResponder()
          case let .method(method):
              if !isSubmitting {
+@@ -182,4 +263,83 @@ final class ProviderKeyFormController: TableController {
+             }
+         }
+     }
++
++    // MARK: - Colour
++
++    /// The row that names the colour this endpoint draws in the list.
++    ///
++    /// A swatch opens the five the design draws with, plus the one the
++    /// endpoint picks for itself. It is a button with a menu rather than a
++    /// tappable row, so choosing a colour never leaves the form.
++    private func makeTintCell() -> UITableViewCell {
++        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
++        cell.selectionStyle = .none
++
++        var content = UIListContentConfiguration.valueCell()
++        content.text = String(localized: "Color")
++        cell.contentConfiguration = content
++
++        let button = UIButton(type: .system)
++        button.showsMenuAsPrimaryAction = true
++        button.image = Self.swatch(ProviderTint.palette[tintIndex ?? 0])
++        button.accessibilityLabel = String(localized: "Color")
++        button.menu = tintMenu()
++        tintButton = button
++        cell.accessoryView = button
++        return cell
++    }
++
++    private func tintMenu() -> UIMenu {
++        var actions = ProviderTint.palette.enumerated().map { index, tone in
++            UIAction(
++                title: " ",
++                image: Self.swatch(tone),
++                state: tintIndex == index ? .on : .off,
++            ) { [weak self] _ in
++                self?.select(tint: index)
++            }
++        }
++        actions.append(UIAction(
++            title: String(localized: "Default"),
++            state: tintIndex == nil ? .on : .off,
++        ) { [weak self] _ in
++            self?.select(tint: nil)
++        })
++        return UIMenu(children: actions)
++    }
++
++    private func select(tint index: Int?) {
++        tintIndex = index
++        tintButton?.image = Self.swatch(ProviderTint.palette[index ?? 0])
++        tintButton?.menu = tintMenu()
++        onTintChange?(index)
++    }
++
++    /// One swatch, drawn rather than filled: a colour cast as a flat image
++    /// would ignore a change of appearance, and a gradient reads as the mark
++    /// it is a preview of.
++    private static func swatch(_ tone: ProviderTint.Tone) -> UIImage {
++        let size = CGSize(width: 22, height: 22)
++        let image = UIGraphicsImageRenderer(size: size).image { context in
++            let rect = CGRect(origin: .zero, size: size).insetBy(dx: 1, dy: 1)
++            let path = UIBezierPath(roundedRect: rect, cornerRadius: 6)
++            context.cgContext.saveGState()
++            path.addClip()
++            let colours = [tone.top.cgColor, tone.bottom.cgColor] as CFArray
++            if let gradient = CGGradient(
++                colorsSpace: CGColorSpaceCreateDeviceRGB(),
++                colors: colours,
++                locations: [0, 1],
++            ) {
++                context.cgContext.drawLinearGradient(
++                    gradient,
++                    start: CGPoint(x: 0, y: 0),
++                    end: CGPoint(x: size.width, y: size.height),
++                    options: [],
++                )
++            }
++            context.cgContext.restoreGState()
++        }
++        return image.withRenderingMode(.alwaysOriginal)
++    }
+ }
 diff --git a/Apelin/Interface/Settings/Accounts/ProviderLabel.swift b/Apelin/Interface/Settings/Accounts/ProviderLabel.swift
 new file mode 100644
 index 0000000..06c6c9e
@@ -839,7 +1984,7 @@ index 0000000..06c6c9e
 +    }
 +}
 diff --git a/Apelin/Interface/Settings/Accounts/ProviderLoginController.swift b/Apelin/Interface/Settings/Accounts/ProviderLoginController.swift
-index 5435039..6b7aa11 100644
+index 5435039..b2f399a 100644
 --- a/Apelin/Interface/Settings/Accounts/ProviderLoginController.swift
 +++ b/Apelin/Interface/Settings/Accounts/ProviderLoginController.swift
 @@ -152,7 +152,7 @@ final class ProviderLoginController: UIViewController {
@@ -860,12 +2005,13 @@ index 5435039..6b7aa11 100644
          subtitleLabel.text = provider.signInSummary
          primaryButton.isHidden = false
          body.isHidden = false
-@@ -430,9 +430,18 @@ final class ProviderLoginController: UIViewController {
+@@ -430,9 +430,26 @@ final class ProviderLoginController: UIViewController {
                  keys: keys,
                  alternatives: methods.filter { $0 != method },
                  initialValues: savedValues,
 +                label: ProviderLabel.name(of: provider),
 +                showsLabel: provider.kind == .openAICompatible,
++                tint: ProviderTint.chosenIndex(for: provider.rawValue),
              )
              form.onSubmit = { [weak self] values in self?.send(values) }
              form.onSwitchMethod = { [weak self] method in self?.switchMethod(to: method) }
@@ -876,17 +2022,882 @@ index 5435039..6b7aa11 100644
 +                ProviderLabel.setName(name, for: self.provider)
 +                self.title = ProviderLabel.displayName(of: self.provider)
 +            }
++            // A colour is stored as it is picked: it is readable on the form
++            // itself, and it is presentation only, so there is nothing to
++            // abandon.
++            form.onTintChange = { [weak self] index in
++                guard let self else { return }
++                ProviderTint.choose(index, for: self.provider.rawValue)
++            }
              addChild(form)
              view.addSubview(form.view)
              form.view.snp.makeConstraints {
+diff --git a/Apelin/Interface/Settings/Accounts/ProviderTint.swift b/Apelin/Interface/Settings/Accounts/ProviderTint.swift
+new file mode 100644
+index 0000000..070d59a
+--- /dev/null
++++ b/Apelin/Interface/Settings/Accounts/ProviderTint.swift
+@@ -0,0 +1,92 @@
++import UIKit
++
++/// The colour a provider carries in the list.
++///
++/// The list exists to tell several relays apart, and the mark every
++/// OpenAI-compatible endpoint shares does not do that: three of them in a row
++/// are the same square logo three times, and the host underneath is small
++/// enough that reading it is the only way to pick the right one. A colour and
++/// the first character of the name are readable before the name is.
++///
++/// A provider that has not been given a colour takes one by its `rawValue`,
++/// stably: the same endpoint keeps the same colour between launches, and two
++/// endpoints next to each other almost never share one.
++enum ProviderTint {
++    struct Tone {
++        let top: UIColor
++        let bottom: UIColor
++
++        /// Behind a badge's text.
++        var wash: UIColor { top.withAlphaComponent(0.15) }
++        /// The badge's text: the darker end, so it reads on `wash`.
++        var ink: UIColor { bottom }
++    }
++
++    /// The five the design draws with, in the order they are handed out.
++    static let palette: [Tone] = [
++        Tone(top: color(0x5B8DEF), bottom: color(0x3E5FD6)),
++        Tone(top: color(0xF0993F), bottom: color(0xD9701F)),
++        Tone(top: color(0x34C759), bottom: color(0x1E9E43)),
++        Tone(top: color(0xAF7AEF), bottom: color(0x7B4FD6)),
++        Tone(top: color(0x8E8E93), bottom: color(0x636366)),
++    ]
++
++    /// The tone `rawValue` picks for itself.
++    ///
++    /// A stable sum, not `hashValue`: Swift seeds its hashing per process, so
++    /// a provider would change colour on every launch.
++    static func tone(for rawValue: String) -> Tone {
++        palette[automaticIndex(for: rawValue)]
++    }
++
++    private static func automaticIndex(for rawValue: String) -> Int {
++        var sum = 0
++        for scalar in rawValue.unicodeScalars {
++            sum = (sum &* 31 &+ Int(scalar.value)) % 1_000_003
++        }
++        return sum % palette.count
++    }
++
++    // MARK: - Choosing one
++
++    private static let selectionKey = "provider.tones"
++
++    private static var selections: [String: Int] {
++        UserDefaults.standard.dictionary(forKey: selectionKey) as? [String: Int] ?? [:]
++    }
++
++    /// The colour chosen for `rawValue`, when one was. `nil` means the
++    /// endpoint takes the one it picks for itself.
++    static func chosenIndex(for rawValue: String) -> Int? {
++        guard let index = selections[rawValue], palette.indices.contains(index) else { return nil }
++        return index
++    }
++
++    /// The tone `rawValue` draws: the one it was given, or its own.
++    static func resolvedTone(for rawValue: String) -> Tone {
++        guard let index = chosenIndex(for: rawValue) else { return tone(for: rawValue) }
++        return palette[index]
++    }
++
++    /// Gives `rawValue` a colour; `nil` hands it back to the automatic one.
++    static func choose(_ index: Int?, for rawValue: String) {
++        var all = selections
++        all[rawValue] = index.flatMap { palette.indices.contains($0) ? $0 : nil }
++        UserDefaults.standard.set(all, forKey: selectionKey)
++    }
++
++    /// The character a mark draws: one letter, in the case a name is written.
++    static func initial(for name: String) -> String {
++        guard let first = name.first(where: { !$0.isWhitespace }) else { return "?" }
++        return String(first).uppercased()
++    }
++
++    private static func color(_ hex: UInt32) -> UIColor {
++        UIColor(
++            red: CGFloat((hex >> 16) & 0xFF) / 255,
++            green: CGFloat((hex >> 8) & 0xFF) / 255,
++            blue: CGFloat(hex & 0xFF) / 255,
++            alpha: 1,
++        )
++    }
++}
 diff --git a/Apelin/Resources/Localizable.xcstrings b/Apelin/Resources/Localizable.xcstrings
-index 3a94bfc..c4f3a08 100644
+index 3a94bfc..6aa7e3a 100644
 --- a/Apelin/Resources/Localizable.xcstrings
 +++ b/Apelin/Resources/Localizable.xcstrings
-@@ -1,6 +1,158 @@
+@@ -1,6 +1,918 @@
  {
    "sourceLanguage" : "en",
    "strings" : {
++    "Prompt" : {
++      "localizations" : {
++        "ar" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "المُدخل"
++          }
++        },
++        "de" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Eingabe"
++          }
++        },
++        "es" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Entrada"
++          }
++        },
++        "fr" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Invite"
++          }
++        },
++        "it" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Prompt"
++          }
++        },
++        "ja" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "プロンプト"
++          }
++        },
++        "ko" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "프롬프트"
++          }
++        },
++        "pt-BR" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Entrada"
++          }
++        },
++        "ru" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Запрос"
++          }
++        },
++        "vi" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Lời nhắc"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "提示"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "提示"
++          }
++        }
++      }
++    },
++    "Reply" : {
++      "localizations" : {
++        "ar" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "الرد"
++          }
++        },
++        "de" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Antwort"
++          }
++        },
++        "es" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Respuesta"
++          }
++        },
++        "fr" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Réponse"
++          }
++        },
++        "it" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Risposta"
++          }
++        },
++        "ja" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "返信"
++          }
++        },
++        "ko" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "답변"
++          }
++        },
++        "pt-BR" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Resposta"
++          }
++        },
++        "ru" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Ответ"
++          }
++        },
++        "vi" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Trả lời"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "回复"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "回覆"
++          }
++        }
++      }
++    },
++    "Activity" : {
++      "localizations" : {
++        "ar" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "النشاط"
++          }
++        },
++        "de" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Aktivität"
++          }
++        },
++        "es" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Actividad"
++          }
++        },
++        "fr" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Activité"
++          }
++        },
++        "it" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Attività"
++          }
++        },
++        "ja" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "アクティビティ"
++          }
++        },
++        "ko" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "활동"
++          }
++        },
++        "pt-BR" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Atividade"
++          }
++        },
++        "ru" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Активность"
++          }
++        },
++        "vi" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Hoạt động"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "活动"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "活動"
++          }
++        }
++      }
++    },
++    "Color" : {
++      "localizations" : {
++        "ar" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "اللون"
++          }
++        },
++        "de" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Farbe"
++          }
++        },
++        "es" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Color"
++          }
++        },
++        "fr" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Couleur"
++          }
++        },
++        "it" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Colore"
++          }
++        },
++        "ja" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "カラー"
++          }
++        },
++        "ko" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "색상"
++          }
++        },
++        "pt-BR" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Cor"
++          }
++        },
++        "ru" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Цвет"
++          }
++        },
++        "vi" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Màu"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "颜色"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "顏色"
++          }
++        }
++      }
++    },
++    "Context" : {
++      "localizations" : {
++        "ar" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "السياق"
++          }
++        },
++        "de" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Kontext"
++          }
++        },
++        "es" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Contexto"
++          }
++        },
++        "fr" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Contexte"
++          }
++        },
++        "it" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Contesto"
++          }
++        },
++        "ja" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "コンテキスト"
++          }
++        },
++        "ko" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "컨텍스트"
++          }
++        },
++        "pt-BR" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Contexto"
++          }
++        },
++        "ru" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Контекст"
++          }
++        },
++        "vi" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Ngữ cảnh"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "上下文"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "上下文"
++          }
++        }
++      }
++    },
++    "Messages" : {
++      "localizations" : {
++        "ar" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "الرسائل"
++          }
++        },
++        "de" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Nachrichten"
++          }
++        },
++        "es" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Mensajes"
++          }
++        },
++        "fr" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Messages"
++          }
++        },
++        "it" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Messaggi"
++          }
++        },
++        "ja" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "メッセージ"
++          }
++        },
++        "ko" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "메시지"
++          }
++        },
++        "pt-BR" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Mensagens"
++          }
++        },
++        "ru" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Сообщения"
++          }
++        },
++        "vi" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Tin nhắn"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "消息"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "訊息"
++          }
++        }
++      }
++    },
++    "Tools" : {
++      "localizations" : {
++        "ar" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "الأدوات"
++          }
++        },
++        "de" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Werkzeuge"
++          }
++        },
++        "es" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Herramientas"
++          }
++        },
++        "fr" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Outils"
++          }
++        },
++        "it" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Strumenti"
++          }
++        },
++        "ja" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "ツール"
++          }
++        },
++        "ko" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "도구"
++          }
++        },
++        "pt-BR" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Ferramentas"
++          }
++        },
++        "ru" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Инструменты"
++          }
++        },
++        "vi" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Công cụ"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "工具"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "工具"
++          }
++        }
++      }
++    },
++    "System Prompt" : {
++      "localizations" : {
++        "ar" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "موجز النظام"
++          }
++        },
++        "de" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Systemprompt"
++          }
++        },
++        "es" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Indicación del sistema"
++          }
++        },
++        "fr" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Invite système"
++          }
++        },
++        "it" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Prompt di sistema"
++          }
++        },
++        "ja" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "システムプロンプト"
++          }
++        },
++        "ko" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "시스템 프롬프트"
++          }
++        },
++        "pt-BR" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Prompt do sistema"
++          }
++        },
++        "ru" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Системная инструкция"
++          }
++        },
++        "vi" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Lời nhắc hệ thống"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "系统提示"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "系統提示"
++          }
++        }
++      }
++    },
++    "Estimated" : {
++      "localizations" : {
++        "ar" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "تقديري"
++          }
++        },
++        "de" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Geschätzt"
++          }
++        },
++        "es" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Estimado"
++          }
++        },
++        "fr" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Estimé"
++          }
++        },
++        "it" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Stimato"
++          }
++        },
++        "ja" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "推定"
++          }
++        },
++        "ko" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "추정"
++          }
++        },
++        "pt-BR" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Estimado"
++          }
++        },
++        "ru" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Оценка"
++          }
++        },
++        "vi" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Ước tính"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "估算"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "估算"
++          }
++        }
++      }
++    },
++    "Refresh" : {
++      "localizations" : {
++        "ar" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "تحديث"
++          }
++        },
++        "de" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Aktualisieren"
++          }
++        },
++        "es" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Actualizar"
++          }
++        },
++        "fr" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Actualiser"
++          }
++        },
++        "it" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Aggiorna"
++          }
++        },
++        "ja" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "更新"
++          }
++        },
++        "ko" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "새로 고침"
++          }
++        },
++        "pt-BR" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Atualizar"
++          }
++        },
++        "ru" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Обновить"
++          }
++        },
++        "vi" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Làm mới"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "刷新"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "重新整理"
++          }
++        }
++      }
++    },
 +    "Balance" : {
 +      "localizations" : {
 +        "ar" : {
@@ -1043,7 +3054,7 @@ index 3a94bfc..c4f3a08 100644
        "localizations" : {
          "ar" : {
 diff --git a/Configuration/Version.xcconfig b/Configuration/Version.xcconfig
-index 068eb46..d1c1c94 100644
+index 068eb46..5de3b6b 100644
 --- a/Configuration/Version.xcconfig
 +++ b/Configuration/Version.xcconfig
 @@ -4,6 +4,11 @@
@@ -1051,15 +3062,15 @@ index 068eb46..d1c1c94 100644
  // project.pbxproj silently shadows these and ships the wrong build number —
  // `make check` rejects that; keep it that way.
 +//
-+// A local build: upstream 0.4.9 does not exist. The number is above 0.4.7 on
++// A local build: upstream 0.5.0 does not exist. The number is above 0.4.7 on
 +// purpose, so `dpkg -i` and Irisin take this package as an upgrade over the
 +// release it was patched from instead of refusing a reinstall of the same
 +// version. Change it back if this ever merges upstream.
  
 -MARKETING_VERSION = 0.4.7
 -CURRENT_PROJECT_VERSION = 40
-+MARKETING_VERSION = 0.4.9
-+CURRENT_PROJECT_VERSION = 42
++MARKETING_VERSION = 0.5.0
++CURRENT_PROJECT_VERSION = 43
 diff --git a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift b/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift
 index fe2f6d7..b033221 100644
 --- a/Packages/ApelinAgent/Sources/ApelinAgent/Session/AgentSession.swift

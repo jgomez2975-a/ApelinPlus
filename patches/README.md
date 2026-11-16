@@ -17,7 +17,7 @@ fork 一份两千多个文件的仓库，上游一更新就得 rebase，而且�
 | patch | 做什么 | 风险 |
 |---|---|---|
 | `0000-lower-ios-sdk-tier` | `IOS_SDK_TIER 27.1 → 26.5`，让 `macos-26` 镜像（Xcode 26.6）能过 `sdk-tier` | 低。只有代码真用了 iOS 27 API 才会炸，`xcodebuild` 会直接报 |
-| `0001-local-features` | 四项：中转站标签、上下文压缩修复、会话内搜索、余额查询；版本 `0.4.7 (40) → 0.4.9 (42)` | 中。11 个文件、3 个新文件，见下 |
+| `0001-local-features` | 四项功能 + 六屏界面：中转站标签与配色、上下文压缩修复、会话内搜索、余额查询与详情页、聊天页上下文条与检查器；版本 `0.4.7 (40) → 0.5.0 (43)` | 中。17 个文件、6 个新文件，见下 |
 
 `0001` 曾是 `0001-endpoint-names`（标签）+ `0002-local-version`（版本号）两个补丁。四项功能里有三项改到了同一批文件（`ChatController`、`ModelProvidersController`），拆开生成时后一个补丁的上下文会依赖前一个已应用，合并成一个补丁反而更稳。
 
@@ -88,14 +88,43 @@ OpenAI-compatible 端点的 `…` 菜单多一项 `Balance`。点开后按 host 
 
 新增文件 `Apelin/Interface/Settings/Accounts/ProviderBalance.swift`。
 
+#### 5. 界面改版
+
+第一版只做了功能，界面一行没动：列表还是每行一个系统 cell，余额是一个 alert，聊天页没有任何地方说上下文有多满。这一节是设计稿那六屏，用 UIKit 重做的（主工程是 `TableController: UITableViewController`，不是 SwiftUI）。
+
+**先前那份 SwiftUI 实现（`Sources/ApelinPlusUI/`，1398 行）没有接进主工程**——`Package.swift`、`Makefile`、工程文件都没有引用它，等于没编译。现在的界面全在 `Apelin/Interface/` 下。
+
+| 屏 | 落到哪 |
+|---|---|
+| ① 服务商列表 | `ProviderAccountCell` + `ProviderTint` + `ModelProvidersController` |
+| ② 编辑表单配色 | `ProviderKeyFormController` 的 Color 行 |
+| ③ 余额详情 | `ProviderBalanceScreen` |
+| ④ 聊天页上下文条 | `ContextMeterView` + `ChatController` |
+| ⑤ 搜索命中高亮 | `ChatSearchController` |
+| ⑥ 上下文检查器 | `ChatContextController` + `ChatContextUsage` |
+
+**① 列表**：29pt 圆角渐变方标，取名字首字（没起名的取 host 首字母，否则每个都显示 `O`）；标题是名字，副标题是 host（中转站不写平台名，方标已经说明了）；右侧是余额胶囊，绿=充足、橙=低于 5、省略号=正在问。颜色按 `rawValue` 稳定散列分配（用求和不用 `hashValue`，Swift 的哈希每进程随机，否则每次启动都换色）。余额**串行**问，一次一个端点——六个请求并发打别人的服务器容易被限流；答案在这个屏幕的生命周期内缓存。
+
+**② 表单**：多一行 Color，右侧色块点开是 5 种配色 + `Default`（交回自动分配）。选中即存（`provider.tones`，`UserDefaults`），因为它不是凭据，也没有"放弃"可言。
+
+**③ 余额页**：从列表 `…` → Balance 推入。大号剩余金额 + 进度条 + `已用 / 总额` 两个数字，右上角 Refresh。查不到时明说"该服务商未提供余额信息"，不当成 key 失效。
+
+**④ 上下文条**：导航栏下沿一条 2pt 细线，占窗口比例。低于 50% 不显示（有意思但不可操作），75% 转橙，90% 转红。它加在 `view` 上并 `bringSubviewToFront`，不是 `messageList` 的子视图——列表在换会话时会整个重建，子视图会跟着被扔掉。
+
+**⑤ 搜索**：命中词在片段里高亮（`tintColor` 18% 底色 + tint 文字），每行左侧标出是用户说的还是模型说的。
+
+**⑥ 检查器**：`…` → Context。总量 / 128k、进度条、按角色拆分（提示 / 回复 / 工具 / 活动）。**数字是估算**：App 侧看不到系统提示、工具目录和 provider 自己的账，而 `TokenEstimate`（`ApelinProtocol` 里的共享估算器，4 个 ASCII 字符≈1 token、其它字符 1:1）就是 agent 数流式输出用的那一个，所以两边口径一致。页面底部写明 "Estimated"。
+
+窗口固定按 128k 算（kwwk 对未知模型的默认值）——真实窗口若是 200k，条会偏高地报占比，这是已知偏差。
+
 ### 关于本地化
 
 `build` 之后会跑 `check-catalog-keys.py`（编译器抽出的字面量必须在 catalog 里）和 `check-translations.py`（每个键必须有 12 种语言）。
 
 - 标签、搜索用到的全是**已有键**：`Name`、`Rename`、`Save`、`Cancel`、`Search`、`No Results`、`Contents`、`Copy`、`%@ (Optional)`、`%@ Options`、`Sign Out of %@?`
-- 余额新增 2 个键，已连同 12 种语言一起写进 `Apelin/Resources/Localizable.xcstrings`：
-  - `Balance`（余额）
-  - `This endpoint does not report a balance.`（该服务商未提供余额信息。）
+- 新增 12 个键，都已连同 12 种语言写进 `Apelin/Resources/Localizable.xcstrings`：
+  - `Balance`、`This endpoint does not report a balance.`
+  - `Color`、`Context`、`Messages`、`Tools`、`System Prompt`、`Estimated`、`Refresh`、`Prompt`、`Reply`、`Activity`
 
 `presentNotice` 的 title/message 参数是 `String.LocalizationValue`，要传**英文字面量**让 AlertController 自己去查 catalog，不要传已本地化的 `String(localized:)`。
 
@@ -119,6 +148,6 @@ git diff --cached > ../apelin-plus/patches/0001-local-features.patch
 
 `git archive v0.4.7` 导出一份干净树，`git init` 后 `git apply --check` 两个补丁，都 `OK`。再实际 apply 一遍，确认：
 
-- `Configuration/Version.xcconfig` 落到 `0.4.9` / `42`
-- 三个新文件到位
-- `Localizable.xcstrings` 仍是合法 JSON，1019 个键，新增的两个键 12 种语言齐全
+- `Configuration/Version.xcconfig` 落到 `0.5.0` / `43`
+- 六个新文件到位
+- `Localizable.xcstrings` 仍是合法 JSON，1029 个键，新增的 12 个键 12 种语言齐全
