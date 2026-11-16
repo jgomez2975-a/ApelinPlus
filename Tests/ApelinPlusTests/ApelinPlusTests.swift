@@ -159,7 +159,7 @@ final class BalanceAdapterTests: XCTestCase {
             session: session,
         )
         XCTAssertEqual(reading.amount, Decimal(string: "42.8"))
-        XCTAssertEqual(reading.usedThisMonth, 1)
+        XCTAssertEqual(reading.usedThisMonth, Decimal(1))
         XCTAssertEqual(reading.currency, "USD")
         XCTAssertEqual(reading.source, .newAPI)
     }
@@ -190,7 +190,7 @@ final class BalanceAdapterTests: XCTestCase {
             settings: BalanceSettings(quotaPerUnit: 100_000),
             session: session,
         )
-        XCTAssertEqual(reading.amount, 10)
+        XCTAssertEqual(reading.amount, Decimal(10))
     }
 
     func testDeepSeekPrefersCNY() async throws {
@@ -206,10 +206,10 @@ final class BalanceAdapterTests: XCTestCase {
             settings: BalanceSettings(),
             session: session,
         )
-        XCTAssertEqual(reading.amount, 110)
+        XCTAssertEqual(reading.amount, Decimal(110))
         XCTAssertEqual(reading.currency, "CNY")
-        XCTAssertEqual(reading.granted, 10)
-        XCTAssertEqual(reading.toppedUp, 100)
+        XCTAssertEqual(reading.granted, Decimal(10))
+        XCTAssertEqual(reading.toppedUp, Decimal(100))
         XCTAssertEqual(reading.isAvailable, true)
     }
 
